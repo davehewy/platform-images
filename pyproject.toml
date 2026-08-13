@@ -28,9 +28,11 @@ release = ["pyinstaller==6.22.0"]
 platform = "platform_images.cli:main"
 
 [project.urls]
+Homepage = "https://dhewy.dev"
 Repository = "https://github.com/davehewy/platform-images"
 Issues = "https://github.com/davehewy/platform-images/issues"
 Releases = "https://github.com/davehewy/platform-images/releases"
+Funding = "https://buymeacoffee.com/davehewy"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/platform_images"]

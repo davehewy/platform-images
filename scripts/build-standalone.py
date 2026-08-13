@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import zipfile
 from pathlib import Path
 
 from platform_images import __version__
@@ -18,7 +19,7 @@ ARCHITECTURES = {
     "arm64": "arm64",
     "x86_64": "amd64",
 }
-SYSTEMS = {"darwin": "darwin", "linux": "linux"}
+SYSTEMS = {"darwin": "darwin", "linux": "linux", "windows": "windows"}
 
 
 def native_platform() -> tuple[str, str]:
@@ -34,20 +35,29 @@ def native_platform() -> tuple[str, str]:
 def archive_name(system: str, architecture: str) -> str:
     if system not in SYSTEMS.values() or architecture not in {"amd64", "arm64"}:
         raise ValueError(f"unsupported standalone target: {system}-{architecture}")
-    return f"platform-images-{system}-{architecture}.tar.gz"
+    suffix = ".zip" if system == "windows" else ".tar.gz"
+    return f"platform-images-{system}-{architecture}{suffix}"
 
 
-def _archive(binary: Path, output: Path, root: Path) -> None:
+def _archive(binary: Path, output: Path, root: Path, system: str) -> None:
     with tempfile.TemporaryDirectory(prefix="platform-images-standalone-") as temporary:
         staging = Path(temporary)
-        staged_binary = staging / "platform"
+        binary_name = "platform.exe" if system == "windows" else "platform"
+        staged_binary = staging / binary_name
         shutil.copy2(binary, staged_binary)
-        staged_binary.chmod(0o755)
+        if system != "windows":
+            staged_binary.chmod(0o755)
         shutil.copy2(root / "LICENSE", staging / "LICENSE")
         shutil.copy2(root / "README.md", staging / "README.md")
-        with tarfile.open(output, "w:gz") as bundle:
-            for name in ("platform", "LICENSE", "README.md"):
-                bundle.add(staging / name, arcname=name)
+        names = (binary_name, "LICENSE", "README.md")
+        if system == "windows":
+            with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+                for name in names:
+                    bundle.write(staging / name, arcname=name)
+        else:
+            with tarfile.open(output, "w:gz") as bundle:
+                for name in names:
+                    bundle.add(staging / name, arcname=name)
 
 
 def build(version: str, expected_system: str, expected_architecture: str, output_dir: Path) -> Path:
@@ -89,7 +99,8 @@ def build(version: str, expected_system: str, expected_architecture: str, output
         cwd=root,
         check=True,
     )
-    binary = binary_directory / "platform"
+    binary_name = "platform.exe" if expected_system == "windows" else "platform"
+    binary = binary_directory / binary_name
     if not binary.is_file():
         raise RuntimeError(f"PyInstaller did not create the expected executable: {binary}")
 
@@ -100,7 +111,7 @@ def build(version: str, expected_system: str, expected_architecture: str, output
 
     output_dir.mkdir(parents=True, exist_ok=True)
     output = output_dir / archive_name(expected_system, expected_architecture)
-    _archive(binary, output, root)
+    _archive(binary, output, root, expected_system)
     print(f"Built platform-images {version}: {output}")
     return output
 

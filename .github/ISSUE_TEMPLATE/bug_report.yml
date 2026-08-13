@@ -1,0 +1,67 @@
+name: Bug report
+description: Report incorrect behaviour, a regression, or a failed image plan or build.
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve platform-images. Please remove registry credentials and other secrets from logs before submitting them.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Run `platform --version`, or provide the release tag or commit SHA.
+      placeholder: v0.3.0
+    validations:
+      required: true
+  - type: dropdown
+    id: installation
+    attributes:
+      label: Installation method
+      options:
+        - Standalone executable
+        - Python wheel or source distribution
+        - uv or pip development installation
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, CPU architecture, Python version if applicable, and GitLab version if relevant.
+      placeholder: Ubuntu 24.04, AMD64, standalone executable, GitLab 18.x
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Include the relevant image layout, Dockerfile relationships, configuration, command, and Git change.
+      placeholder: Describe the smallest repository setup and commands that reproduce the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour and sanitized output
+      render: shell
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues for the same problem.
+          required: true
+        - label: I removed credentials, registry tokens, and other secrets from this report.
+          required: true
+

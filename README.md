@@ -2,8 +2,11 @@
 
 [![CI](https://github.com/davehewy/platform-images/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/davehewy/platform-images/actions/workflows/ci.yml)
 [![Release](https://github.com/davehewy/platform-images/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/davehewy/platform-images/actions/workflows/release.yml)
+[![Latest release](https://img.shields.io/github/v/release/davehewy/platform-images)](https://github.com/davehewy/platform-images/releases/latest)
+[![Open issues](https://img.shields.io/github/issues/davehewy/platform-images)](https://github.com/davehewy/platform-images/issues)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white)](pyproject.toml)
+[![Buy me a coffee](https://img.shields.io/badge/Buy_me_a_coffee-support-FFDD00.svg?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/davehewy)
 
 `platform-images` is a lightweight way to keep multiple container images in one repository. The
 images may be completely independent, share a common parent, or form deeper dependency chains. When
@@ -45,6 +48,7 @@ history remain the source of truth.
 - [Command guide](#command-guide)
 - [CI operating model](#ci-operating-model)
 - [Quality and integration checks](#quality-and-integration-checks)
+- [Support and contributing](#support-and-contributing)
 - [License](#license)
 
 ## What this solves and what it does not
@@ -82,8 +86,18 @@ Install a specific version or choose another destination with environment variab
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/davehewy/platform-images/main/scripts/install.sh |
-  PLATFORM_IMAGES_VERSION=0.2.0 PLATFORM_IMAGES_INSTALL_DIR=/usr/local/bin sh
+  PLATFORM_IMAGES_VERSION=0.3.0 PLATFORM_IMAGES_INSTALL_DIR=/usr/local/bin sh
 ```
+
+On Windows, run this in PowerShell. It verifies the Windows archive, installs `platform.exe` below
+`%LOCALAPPDATA%\Programs`, and adds its directory to the user `PATH`:
+
+```powershell
+irm https://raw.githubusercontent.com/davehewy/platform-images/main/scripts/install.ps1 | iex
+```
+
+Set `$env:PLATFORM_IMAGES_VERSION` or `$env:PLATFORM_IMAGES_INSTALL_DIR` first to pin a release or
+change the destination.
 
 Each [GitHub release](https://github.com/davehewy/platform-images/releases) provides:
 
@@ -93,10 +107,14 @@ Each [GitHub release](https://github.com/davehewy/platform-images/releases) prov
 | GNU/Linux | ARM64 / AArch64 | `platform-images-linux-arm64.tar.gz` |
 | macOS / Darwin | Intel AMD64 | `platform-images-darwin-amd64.tar.gz` |
 | macOS / Darwin | Apple Silicon ARM64 | `platform-images-darwin-arm64.tar.gz` |
+| Windows | AMD64 / x86_64 | `platform-images-windows-amd64.zip` |
+| Windows | ARM64 | `platform-images-windows-arm64.zip` |
 
-Every archive contains the `platform` executable, README, and MIT license. `SHA256SUMS` covers all
-four archives. The Linux executables are built on Ubuntu 22.04 and target modern glibc-based 64-bit
-distributions. The macOS executables are built natively on Intel and Apple Silicon runners.
+Every archive contains the native `platform` executable, README, and MIT license. `SHA256SUMS`
+covers all six archives. The Linux executables are built on Ubuntu 22.04 and target modern
+glibc-based 64-bit distributions. The macOS executables are built natively on Intel and Apple
+Silicon runners. Windows executables are built natively for x86_64 and ARM64; GitHub currently
+classifies its hosted Windows ARM64 runner as public preview.
 
 The executable bundles Python and the Python package dependencies. Commands still expect the tools
 they orchestrate to exist: Git for change inspection, Podman for image builds, and AWS CLI plus
@@ -108,7 +126,7 @@ If Python 3.12 is already part of the team's toolchain, `uv` can install an isol
 
 ```bash
 uv tool install --python 3.12 \
-  "git+https://github.com/davehewy/platform-images.git@v0.2.0"
+  "git+https://github.com/davehewy/platform-images.git@v0.3.0"
 ```
 
 The universal `platform_images-<version>-py3-none-any.whl` and conventional Python source
@@ -743,6 +761,19 @@ The Podman integration test builds and runs the `base -> curl` topology. It is s
 Podman is absent or unavailable. GitHub CI requires Podman, repeats the locked quality suite, and
 builds the wheel and source distribution. Conventional Commit messages drive Python Semantic
 Release after `main` passes CI.
+
+## Support and contributing
+
+Found incorrect graph selection, an unsupported Dockerfile relationship, or a generated pipeline
+problem? [Open a structured bug report](https://github.com/davehewy/platform-images/issues/new?template=bug_report.yml).
+Ideas for broader repository layouts or CI behaviour are welcome through the
+[feature request form](https://github.com/davehewy/platform-images/issues/new?template=feature_request.yml).
+Please search [existing issues](https://github.com/davehewy/platform-images/issues) first and never
+include registry credentials or tokens in logs.
+
+Development and release guidance lives in [CONTRIBUTING.md](CONTRIBUTING.md). The project is
+maintained by [David Heward](https://dhewy.dev). If it saves your platform team time, you can
+[buy me a coffee](https://buymeacoffee.com/davehewy).
 
 ## License
 

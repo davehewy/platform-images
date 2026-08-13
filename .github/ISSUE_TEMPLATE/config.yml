@@ -1,0 +1,6 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Project documentation
+    url: https://github.com/davehewy/platform-images#readme
+    about: Check the README, worked examples, and configuration guide before opening an issue.
+

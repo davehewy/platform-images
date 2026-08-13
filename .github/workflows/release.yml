@@ -76,18 +76,32 @@ jobs:
             runner: ubuntu-22.04
             os: linux
             arch: amd64
+            python_arch: x64
           - platform: linux-arm64
             runner: ubuntu-22.04-arm
             os: linux
             arch: arm64
+            python_arch: arm64
           - platform: darwin-amd64
             runner: macos-15-intel
             os: darwin
             arch: amd64
+            python_arch: x64
           - platform: darwin-arm64
             runner: macos-14
             os: darwin
             arch: arm64
+            python_arch: arm64
+          - platform: windows-amd64
+            runner: windows-2025
+            os: windows
+            arch: amd64
+            python_arch: x64
+          - platform: windows-arm64
+            runner: windows-11-arm
+            os: windows
+            arch: arm64
+            python_arch: arm64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     permissions:
@@ -104,10 +118,14 @@ jobs:
           version: "0.12.3"
           enable-cache: true
 
-      - name: Install Python and standalone build dependencies
-        run: |
-          uv python install 3.12
-          uv sync --locked --extra release
+      - name: Install native Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          architecture: ${{ matrix.python_arch }}
+
+      - name: Install standalone build dependencies
+        run: uv sync --locked --extra release
 
       - name: Build and smoke-test standalone archive
         run: >-
@@ -121,7 +139,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: standalone-${{ matrix.platform }}
-          path: standalone-dist/*.tar.gz
+          path: standalone-dist/platform-images-*
           if-no-files-found: error
 
   publish-standalone:
@@ -142,10 +160,73 @@ jobs:
 
       - name: Generate checksums
         working-directory: standalone-dist
-        run: sha256sum platform-images-*.tar.gz > SHA256SUMS
+        run: sha256sum platform-images-* > SHA256SUMS
 
       - name: Attach standalone archives to the GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.release.outputs.tag }}
         run: gh release upload "$RELEASE_TAG" standalone-dist/* --clobber
+
+  verify-installer:
+    name: Verify installer ${{ matrix.platform }}
+    needs: [release, publish-standalone]
+    if: needs.release.outputs.released == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-amd64
+            runner: ubuntu-22.04
+            os: linux
+          - platform: linux-arm64
+            runner: ubuntu-22.04-arm
+            os: linux
+          - platform: darwin-amd64
+            runner: macos-15-intel
+            os: darwin
+          - platform: darwin-arm64
+            runner: macos-14
+            os: darwin
+          - platform: windows-amd64
+            runner: windows-2025
+            os: windows
+          - platform: windows-arm64
+            runner: windows-11-arm
+            os: windows
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out released installers and example
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release.outputs.tag }}
+
+      - name: Install and exercise the POSIX release
+        if: matrix.os != 'windows'
+        shell: bash
+        env:
+          PLATFORM_IMAGES_VERSION: ${{ needs.release.outputs.version }}
+          PLATFORM_IMAGES_INSTALL_DIR: ${{ runner.temp }}/platform-images-bin
+          PLATFORM_IMAGES_ROOT: ${{ github.workspace }}
+        run: |
+          sh scripts/install.sh
+          "${PLATFORM_IMAGES_INSTALL_DIR}/platform" images validate
+          "${PLATFORM_IMAGES_INSTALL_DIR}/platform" images graph
+
+      - name: Install and exercise the Windows release
+        if: matrix.os == 'windows'
+        shell: pwsh
+        env:
+          PLATFORM_IMAGES_VERSION: ${{ needs.release.outputs.version }}
+          PLATFORM_IMAGES_INSTALL_DIR: ${{ runner.temp }}\platform-images-bin
+          PLATFORM_IMAGES_ROOT: ${{ github.workspace }}
+        run: |
+          & .\scripts\install.ps1
+          & (Join-Path $env:PLATFORM_IMAGES_INSTALL_DIR "platform.exe") images validate
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & (Join-Path $env:PLATFORM_IMAGES_INSTALL_DIR "platform.exe") images graph
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

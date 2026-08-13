@@ -60,18 +60,32 @@ def test_release_workflow_builds_all_supported_standalone_platforms() -> None:
     assert isinstance(jobs, dict)
     standalone = jobs["standalone"]
     publish = jobs["publish-standalone"]
+    verify = jobs["verify-installer"]
     assert isinstance(standalone, dict)
     assert isinstance(publish, dict)
+    assert isinstance(verify, dict)
     entries = standalone["strategy"]["matrix"]["include"]  # type: ignore[index]
     assert {(entry["os"], entry["arch"]) for entry in entries} == {
         ("linux", "amd64"),
         ("linux", "arm64"),
         ("darwin", "amd64"),
         ("darwin", "arm64"),
+        ("windows", "amd64"),
+        ("windows", "arm64"),
     }
     assert standalone["needs"] == "release"
     assert publish["needs"] == ["release", "standalone"]
     assert publish["permissions"] == {"contents": "write"}
+    upload_step = next(
+        step
+        for step in publish["steps"]
+        if step["name"] == "Attach standalone archives to the GitHub release"
+    )
+    assert upload_step["env"]["GH_REPO"] == "${{ github.repository }}"
+    assert verify["needs"] == ["release", "publish-standalone"]
+    assert {entry["platform"] for entry in verify["strategy"]["matrix"]["include"]} == {
+        entry["platform"] for entry in entries
+    }
 
 
 def test_standalone_archive_names_are_stable_for_latest_downloads() -> None:
@@ -82,6 +96,8 @@ def test_standalone_archive_names_are_stable_for_latest_downloads() -> None:
         "linux-arm64",
         "darwin-amd64",
         "darwin-arm64",
+        "windows-amd64",
+        "windows-arm64",
     }
 
 
@@ -93,6 +109,26 @@ def test_installer_is_executable_and_references_every_release_asset() -> None:
     assert "SHA256SUMS" in contents
     assert "linux" in contents
     assert "darwin" in contents
+    windows_installer = ROOT / "scripts" / "install.ps1"
+    windows_contents = windows_installer.read_text(encoding="utf-8")
+    assert "platform-images-windows-$architecture.zip" in windows_contents
+    assert "SHA256SUMS" in windows_contents
+    assert "Get-FileHash" in windows_contents
+
+
+def test_issue_forms_and_support_links_are_configured() -> None:
+    templates = ROOT / ".github" / "ISSUE_TEMPLATE"
+    bug_report = yaml.safe_load((templates / "bug_report.yml").read_text(encoding="utf-8"))
+    feature_request = yaml.safe_load(
+        (templates / "feature_request.yml").read_text(encoding="utf-8")
+    )
+    issue_config = yaml.safe_load((templates / "config.yml").read_text(encoding="utf-8"))
+    funding = yaml.safe_load((ROOT / ".github" / "FUNDING.yml").read_text(encoding="utf-8"))
+
+    assert bug_report["name"] == "Bug report"
+    assert feature_request["name"] == "Feature request"
+    assert issue_config["blank_issues_enabled"] is False
+    assert funding["custom"] == ["https://buymeacoffee.com/davehewy"]
 
 
 def test_release_and_commit_conventions_share_project_version() -> None:
