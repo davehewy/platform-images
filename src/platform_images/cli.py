@@ -335,7 +335,7 @@ def _run(arguments: argparse.Namespace, cwd: Path | None, environment: Mapping[s
         print(
             render_graph_json(graph, root)
             if arguments.format == "json"
-            else render_graph_text(graph)
+            else render_graph_text(graph, ascii_only=sys.platform == "win32")
         )
         return 0
     if arguments.command == "build":

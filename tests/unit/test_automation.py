@@ -74,6 +74,12 @@ def test_release_workflow_builds_all_supported_standalone_platforms() -> None:
         ("windows", "arm64"),
     }
     assert standalone["needs"] == "release"
+    dependency_step = next(
+        step
+        for step in standalone["steps"]
+        if step["name"] == "Install standalone build dependencies"
+    )
+    assert "steps.python.outputs.python-path" in dependency_step["run"]
     assert publish["needs"] == ["release", "standalone"]
     assert publish["permissions"] == {"contents": "write"}
     upload_step = next(

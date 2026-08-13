@@ -6,6 +6,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import sysconfig
 import tarfile
 import tempfile
 import zipfile
@@ -20,11 +21,18 @@ ARCHITECTURES = {
     "x86_64": "amd64",
 }
 SYSTEMS = {"darwin": "darwin", "linux": "linux", "windows": "windows"}
+WINDOWS_INTERPRETER_ARCHITECTURES = {
+    "win-amd64": "amd64",
+    "win-arm64": "arm64",
+}
 
 
 def native_platform() -> tuple[str, str]:
     system = SYSTEMS.get(platform.system().casefold())
-    architecture = ARCHITECTURES.get(platform.machine().casefold())
+    if system == "windows":
+        architecture = WINDOWS_INTERPRETER_ARCHITECTURES.get(sysconfig.get_platform().casefold())
+    else:
+        architecture = ARCHITECTURES.get(platform.machine().casefold())
     if system is None or architecture is None:
         raise RuntimeError(
             f"unsupported standalone build host: {platform.system()} {platform.machine()}"

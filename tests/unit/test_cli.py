@@ -32,6 +32,17 @@ def test_list_validate_graph_and_dry_run(
     assert "base=container-image://localhost/platform-images/base:dev" in commands
 
 
+def test_graph_uses_ascii_tree_on_windows(
+    repository_factory: Callable[[dict[str, str]], Path], capsys, monkeypatch
+) -> None:
+    root = repository_factory({"base": "FROM alpine\n", "curl": "FROM base\n"})
+    monkeypatch.setattr("platform_images.cli.sys.platform", "win32")
+
+    assert main(["images", "graph"], cwd=root, environment={}) == 0
+
+    assert capsys.readouterr().out == "base\n\\-- curl\n"
+
+
 def test_validation_exit_code_and_json_error_code(
     repository_factory: Callable[[dict[str, str]], Path], capsys
 ) -> None:

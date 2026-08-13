@@ -39,6 +39,21 @@ def test_archive_names_match_release_contract(
     assert load_builder().archive_name(system, architecture) == expected
 
 
+@pytest.mark.parametrize(
+    ("interpreter_platform", "expected_architecture"),
+    [("win-amd64", "amd64"), ("win-arm64", "arm64")],
+)
+def test_windows_target_uses_interpreter_architecture(
+    interpreter_platform: str, expected_architecture: str, monkeypatch
+) -> None:
+    builder = load_builder()
+    monkeypatch.setattr(builder.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(builder.platform, "machine", lambda: "ARM64")
+    monkeypatch.setattr(builder.sysconfig, "get_platform", lambda: interpreter_platform)
+
+    assert builder.native_platform() == ("windows", expected_architecture)
+
+
 def test_posix_archive_contains_executable_documentation_and_license(tmp_path: Path) -> None:
     builder = load_builder()
     root = tmp_path / "root"
