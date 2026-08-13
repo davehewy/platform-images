@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Python quality and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d # v10.0.0
+        with:
+          version: "0.12.3"
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install 3.12
+
+      - name: Verify lockfile and install project
+        run: uv sync --locked --extra dev
+
+      - name: Run pre-commit file checks
+        run: uv run --locked --extra dev pre-commit run --all-files --show-diff-on-failure
+
+      - name: Run full test suite
+        run: uv run --locked --extra dev pytest -q
+
+      - name: Validate pull request title
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: uv run --locked --extra dev cz check --message "$PR_TITLE"
+
+      - name: Build wheel and source distribution
+        run: uv build
+
+  podman-integration:
+    name: Podman integration
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d # v10.0.0
+        with:
+          version: "0.12.3"
+          enable-cache: true
+
+      - name: Install Python and project
+        run: |
+          uv python install 3.12
+          uv sync --locked --extra dev
+
+      - name: Install Podman
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes podman
+          podman info
+
+      - name: Exercise real base-to-dependent build
+        run: uv run --locked --extra dev pytest -m integration -q

@@ -1,0 +1,39 @@
+minimum_pre_commit_version: "4.6.2"
+default_install_hook_types:
+  - pre-commit
+  - commit-msg
+  - pre-push
+
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run --locked --extra dev ruff check --fix
+        language: system
+        types: [python]
+
+      - id: ruff-format
+        name: ruff format
+        entry: uv run --locked --extra dev ruff format
+        language: system
+        types: [python]
+
+      - id: repository-validation
+        name: container image repository validation
+        entry: uv run --locked --extra dev platform images validate
+        language: system
+        pass_filenames: false
+
+      - id: unit-tests
+        name: unit tests
+        entry: uv run --locked --extra dev pytest -m "not integration" -q
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: commitizen
+        name: conventional commit message
+        entry: uv run --locked --extra dev cz check --allow-abort --commit-msg-file
+        language: system
+        stages: [commit-msg]

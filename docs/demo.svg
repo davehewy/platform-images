@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="650" viewBox="0 0 960 650" role="img" aria-labelledby="title description" fill="#c9d1d9">
+  <title id="title">Platform Images terminal demonstration</title>
+  <desc id="description">Terminal showing image discovery, dependency graph output, affected image selection, dry-run ordering, and generated GitLab jobs.</desc>
+  <style>
+    .terminal { fill: #0d1117; stroke: #30363d; stroke-width: 2; }
+    .bar { fill: #161b22; }
+    .rule { stroke: #30363d; stroke-width: 1; }
+    .dot-red { fill: #ff5f56; }
+    .dot-yellow { fill: #ffbd2e; }
+    .dot-green { fill: #27c93f; }
+    text { font-family: "DejaVu Sans Mono", "SFMono-Regular", Consolas, monospace; font-size: 17px; fill: #c9d1d9; }
+    .title { font-size: 15px; fill: #8b949e; }
+    .prompt { fill: #7ee787; }
+    .command { fill: #f0f6fc; }
+    .accent { fill: #79c0ff; }
+    .muted { fill: #8b949e; }
+    .success { fill: #56d364; }
+  </style>
+
+  <rect class="terminal" x="1" y="1" width="958" height="648" rx="12" />
+  <path class="bar" d="M13 1h934a12 12 0 0 1 12 12v38H1V13A12 12 0 0 1 13 1z" />
+  <circle class="dot-red" cx="27" cy="26" r="7" />
+  <circle class="dot-yellow" cx="51" cy="26" r="7" />
+  <circle class="dot-green" cx="75" cy="26" r="7" />
+  <text class="title" x="480" y="31" text-anchor="middle">platform-images — dependency-aware builds</text>
+
+  <text x="30" y="84"><tspan class="prompt">$</tspan><tspan class="command"> platform images graph</tspan></text>
+  <text x="30" y="116">base</text>
+  <text x="30" y="144">└── curl</text>
+  <text class="muted" x="270" y="116"># inferred from images/curl/Dockerfile</text>
+  <text class="success" x="270" y="144">✓ no central image registry file</text>
+
+  <line class="rule" x1="30" y1="174" x2="930" y2="174" />
+
+  <text x="30" y="210"><tspan class="prompt">$</tspan><tspan class="command"> platform images affected --base HEAD~1 --head HEAD</tspan></text>
+  <text x="30" y="244">base</text>
+  <text x="30" y="272">curl</text>
+  <text class="accent" x="270" y="244">base changed</text>
+  <text class="muted" x="270" y="272">curl selected as a transitive dependent</text>
+
+  <line class="rule" x1="30" y1="302" x2="930" y2="302" />
+
+  <text x="30" y="338"><tspan class="prompt">$</tspan><tspan class="command"> platform images build curl --dry-run</tspan></text>
+  <text class="accent" x="30" y="376">1/2</text>
+  <text x="84" y="376">podman build ... --tag localhost/platform-images/base:dev</text>
+  <text class="accent" x="30" y="408">2/2</text>
+  <text x="84" y="408">podman build --build-context</text>
+  <text x="84" y="438">base=container-image://localhost/platform-images/base:dev ...</text>
+  <text class="success" x="30" y="470">✓ deterministic topological build order: base → curl</text>
+
+  <line class="rule" x1="30" y1="500" x2="930" y2="500" />
+
+  <text x="30" y="536"><tspan class="prompt">$</tspan><tspan class="command"> platform images plan --ci --all --format gitlab</tspan></text>
+  <text class="accent" x="30" y="578">image_base</text>
+  <text x="180" y="578">→</text>
+  <text class="accent" x="220" y="578">image_curl</text>
+  <text x="370" y="578">→</text>
+  <text class="accent" x="410" y="578">promote_main</text>
+  <text class="muted" x="30" y="612">exact image refs       direct needs       promotion only after graph success</text>
+</svg>

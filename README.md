@@ -27,6 +27,21 @@ base
 └── curl
 ```
 
+## Demo
+
+![Terminal demonstration of discovery, affected-image selection, build ordering, and generated CI jobs](docs/demo.svg)
+
+The animation uses the checked-in `base` and `curl` examples. The same commands are copyable:
+
+```bash
+platform images list
+platform images graph
+platform images build curl --dry-run
+
+# With the GitLab registry and CI variables present:
+platform images plan --ci --all --format gitlab
+```
+
 `platform images build curl` first builds `localhost/platform-images/base:dev`, then binds that
 precise reference as the named `base` context while building
 `localhost/platform-images/curl:dev`. Preview both commands without executing them:
@@ -72,7 +87,8 @@ allowlist entry. This prevents a misspelled or deleted local dependency from sil
 public-registry pull.
 
 See [architecture](docs/architecture.md), [adding an image](docs/adding-an-image.md),
-[GitLab CI](docs/gitlab-ci.md), and [ECR setup](docs/ecr-setup.md).
+[GitLab CI](docs/gitlab-ci.md), [ECR setup](docs/ecr-setup.md), and
+[contributing and releases](CONTRIBUTING.md).
 
 ## Quality and integration checks
 
@@ -85,3 +101,7 @@ pytest -m integration
 
 The Podman integration test builds and runs the dummy `base -> curl` topology. It is skipped when
 Podman is absent or its service is unavailable.
+
+GitHub CI repeats the locked quality suite, builds wheel and source distributions, and runs the
+Podman integration test on a runner where Podman is required rather than skipped. Conventional
+Commit messages drive the Python Semantic Release workflow after `main` passes CI.
