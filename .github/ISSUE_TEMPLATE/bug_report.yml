@@ -30,8 +30,8 @@ body:
     id: environment
     attributes:
       label: Environment
-      description: Operating system, CPU architecture, Docker or Podman version, and GitHub Actions or GitLab version if relevant.
-      placeholder: Ubuntu 24.04, AMD64, Docker 29 / Buildx 0.30, GitHub Actions
+      description: Operating system, CPU architecture, builder/transport versions, and GitHub Actions or GitLab version if relevant.
+      placeholder: Ubuntu 24.04, AMD64, nerdctl 2.3 / BuildKit 0.29 / containerd 2.3, GitLab CI
     validations:
       required: true
   - type: textarea

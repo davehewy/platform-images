@@ -10,7 +10,7 @@ from platform_images.config import RepositoryConfig
 from platform_images.discovery import discover_targets
 from platform_images.errors import PlatformImagesError
 from platform_images.graph import build_graph
-from platform_images.models import BuildEngine, BuildMode, BuildPlan
+from platform_images.models import BuildBackend, BuildMode, BuildPlan, RegistryTransport
 from platform_images.planner import all_ci_plan, local_plan
 from platform_images.renderers.github import (
     graph_layer_count,
@@ -175,7 +175,7 @@ def test_generated_github_workflow_has_static_waves_dynamic_matrices_and_gated_p
     )
     build_command = jobs["image_layer_1"]["steps"][-1]["run"]
     assert "build-plan-target" in build_command
-    assert "--engine docker" in build_command
+    assert "--builder docker --registry-transport docker" in build_command
     assert jobs["promote"]["needs"] == ["plan", "image_layer_1"]
     assert "default_branch" in jobs["promote"]["if"]
     assert "id-token" in jobs["plan"]["permissions"]
@@ -194,7 +194,8 @@ def test_generated_github_workflow_supports_podman_and_ambient_credentials(
         render_github_workflow(
             graph,
             config,
-            engine=BuildEngine.PODMAN,
+            builder=BuildBackend.PODMAN,
+            registry_transport=RegistryTransport.PODMAN,
             aws_auth="ambient",
             runner="self-hosted",
         )
@@ -202,8 +203,45 @@ def test_generated_github_workflow_supports_podman_and_ambient_credentials(
     layer = document["jobs"]["image_layer_0"]
     assert layer["runs-on"] == "self-hosted"
     assert "id-token" not in layer["permissions"]
-    assert any(step.get("name") == "Install Podman" for step in layer["steps"])
-    assert any("--engine podman" in step.get("run", "") for step in layer["steps"])
+    assert any(step.get("name") == "Install containers-storage tooling" for step in layer["steps"])
+    assert any(
+        "--builder podman --registry-transport podman" in step.get("run", "")
+        for step in layer["steps"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("builder", "transport", "verification"),
+    [
+        (BuildBackend.BUILDAH, RegistryTransport.BUILDAH, "buildah version"),
+        (BuildBackend.NERDCTL, RegistryTransport.NERDCTL, "buildctl --version"),
+    ],
+)
+def test_generated_github_workflow_supports_additional_execution_pairs(
+    repository_factory: Callable[[dict[str, str]], Path],
+    builder: BuildBackend,
+    transport: RegistryTransport,
+    verification: str,
+) -> None:
+    root = repository_factory({"base": "FROM alpine\n"})
+    config, graph = state(root)
+
+    document = yaml.safe_load(
+        render_github_workflow(
+            graph,
+            config,
+            builder=builder,
+            registry_transport=transport,
+            aws_auth="ambient",
+            runner="self-hosted",
+        )
+    )
+    layer = document["jobs"]["image_layer_0"]
+    scripts = "\n".join(str(step.get("run", "")) for step in layer["steps"])
+
+    assert verification in scripts
+    assert f"--builder {builder.value}" in scripts
+    assert f"--registry-transport {transport.value}" in scripts
 
 
 def test_checked_in_parent_and_child_template_match_dynamic_contract() -> None:
@@ -225,6 +263,7 @@ def test_checked_in_parent_and_child_template_match_dynamic_contract() -> None:
         "platform images render-plan image-plan.json --format gitlab > generated-images.yml"
         in scripts
     )
-    assert template[".image-build"]["tags"] == ["podman"]
+    assert template["variables"]["PLATFORM_IMAGES_RUNNER_TAG"] == "podman"
+    assert template[".image-build"]["tags"] == ["$PLATFORM_IMAGES_RUNNER_TAG"]
     assert template[".image-build"]["before_script"][-1] == ("platform images registry-login")
     assert not any(key.startswith("image_") for key in parent)

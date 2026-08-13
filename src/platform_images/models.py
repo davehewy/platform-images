@@ -19,9 +19,23 @@ class BuildMode(StrEnum):
     DEFAULT_BRANCH = "default_branch"
 
 
-class BuildEngine(StrEnum):
+class BuildBackend(StrEnum):
     PODMAN = "podman"
     DOCKER = "docker"
+    NERDCTL = "nerdctl"
+    BUILDAH = "buildah"
+
+
+# Kept as a source-compatible alias for integrations which imported the v0.4 name.  Execution is
+# now modelled as a build backend plus an independently selected registry transport.
+BuildEngine = BuildBackend
+
+
+class RegistryTransport(StrEnum):
+    PODMAN = "podman"
+    DOCKER = "docker"
+    NERDCTL = "nerdctl"
+    BUILDAH = "buildah"
 
 
 @dataclass(frozen=True)

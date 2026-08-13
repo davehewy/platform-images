@@ -4,41 +4,77 @@ import json
 import os
 import re
 import shlex
+import tarfile
 import tempfile
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
+from platform_images.backends import (
+    BUILDERS,
+    PushStrategy,
+    inspect_command,
+    push_command,
+    validate_execution_pair,
+)
 from platform_images.errors import PlatformImagesError, ProcessError
 from platform_images.graph import ImageGraph
-from platform_images.models import BuildEngine, BuildPlan, BuildPlanTarget
+from platform_images.models import BuildBackend, BuildPlan, BuildPlanTarget, RegistryTransport
 from platform_images.process import ProcessRunner
 from platform_images.references import immutable_reference
+
+DIGEST_RE = re.compile(r"sha256:[0-9A-Fa-f]{64}")
+IMAGE_MANIFEST_MEDIA_TYPES = {
+    "application/vnd.docker.distribution.manifest.v2+json",
+    "application/vnd.oci.image.manifest.v1+json",
+}
+
+
+def _valid_digest(value: object) -> str | None:
+    return value if isinstance(value, str) and DIGEST_RE.fullmatch(value) else None
 
 
 def build_command(
     target: BuildPlanTarget,
     *,
     labels: Mapping[str, str] | None = None,
-    engine: BuildEngine = BuildEngine.PODMAN,
+    builder: BuildBackend | None = None,
+    engine: BuildBackend | None = None,
     push: bool = False,
     metadata_file: Path | None = None,
+    context_overrides: Mapping[str, str] | None = None,
 ) -> list[str]:
-    if engine is BuildEngine.DOCKER:
+    if builder is not None and engine is not None and builder is not engine:
+        raise ValueError("builder and legacy engine select different backends")
+    builder = builder or engine or BuildBackend.PODMAN
+    capabilities = BUILDERS[builder]
+    if builder is BuildBackend.DOCKER:
         command = ["docker", "buildx", "build", "--push" if push else "--load"]
-        context_scheme = "docker-image://"
         if metadata_file is not None:
             command.extend(["--metadata-file", str(metadata_file)])
+    elif builder is BuildBackend.NERDCTL:
+        if metadata_file is not None:
+            raise ValueError("nerdctl builds do not accept a Buildx metadata file")
+        command = ["nerdctl", "build"]
+        if push:
+            command.extend(["--output", f"type=image,name={target.output_ref},push=true"])
     else:
         if metadata_file is not None:
-            raise ValueError("Podman builds do not accept a Buildx metadata file")
-        command = ["podman", "build"]
-        context_scheme = "container-image://"
+            raise ValueError(f"{builder.value} builds do not accept a Buildx metadata file")
+        if push:
+            raise ValueError(f"{builder.value} requires a separate registry push")
+        command = [capabilities.executable, "build"]
     for dependency, reference in sorted(target.input_refs.items()):
-        command.extend(["--build-context", f"{dependency}={context_scheme}{reference}"])
+        context = (context_overrides or {}).get(dependency)
+        if context is None:
+            context = f"{capabilities.context_scheme}{reference}"
+        command.extend(["--build-context", f"{dependency}={context}"])
     for name, value in sorted((labels or {}).items()):
         command.extend(["--label", f"{name}={value}"])
-    command.extend(["--file", target.dockerfile, "--tag", target.output_ref, target.context])
+    command.extend(["--file", target.dockerfile])
+    if not (builder is BuildBackend.NERDCTL and push):
+        command.extend(["--tag", target.output_ref])
+    command.append(target.context)
     return command
 
 
@@ -48,17 +84,90 @@ def execute_local_plan(
     root: Path,
     dry_run: bool = False,
     runner: ProcessRunner | None = None,
-    engine: BuildEngine = BuildEngine.PODMAN,
+    builder: BuildBackend | None = None,
+    engine: BuildBackend | None = None,
 ) -> tuple[str, ...]:
+    if builder is not None and engine is not None and builder is not engine:
+        raise ValueError("builder and legacy engine select different backends")
+    builder = builder or engine or BuildBackend.PODMAN
     process = runner or ProcessRunner()
     rendered: list[str] = []
-    for target in plan.targets:
-        command = build_command(target, engine=engine)
-        display = shlex.join(command)
-        rendered.append(display)
-        if not dry_run:
-            process.run(command, cwd=root)
+    required_as_input = {
+        reference for target in plan.targets for reference in target.input_refs.values()
+    }
+    with tempfile.TemporaryDirectory(prefix="platform-images-local-contexts-") as directory:
+        context_directory = Path(directory)
+        local_contexts: dict[str, str] = {}
+        for target in plan.targets:
+            overrides = {
+                dependency: local_contexts[reference]
+                for dependency, reference in target.input_refs.items()
+                if reference in local_contexts
+            }
+            command = build_command(
+                target,
+                builder=builder,
+                context_overrides=overrides,
+            )
+            rendered.append(shlex.join(command))
+            if not dry_run:
+                process.run(command, cwd=root)
+            if builder is not BuildBackend.NERDCTL or target.output_ref not in required_as_input:
+                continue
+            archive = context_directory / f"{target.name}.tar"
+            export_command = [
+                "nerdctl",
+                "save",
+                "--output",
+                str(archive),
+                target.output_ref,
+            ]
+            rendered.append(shlex.join(export_command))
+            if dry_run:
+                local_contexts[target.output_ref] = (
+                    f"oci-layout://<verified-temporary-layout-for-{target.name}>"
+                )
+                continue
+            process.run(export_command, cwd=root)
+            layout = context_directory / target.name
+            layout.mkdir()
+            try:
+                with tarfile.open(archive) as image_archive:
+                    image_archive.extractall(layout, filter="data")
+            except (OSError, tarfile.TarError) as exc:
+                raise PlatformImagesError(
+                    f"nerdctl did not export a valid OCI layout for {target.name}: {exc}"
+                ) from exc
+            local_contexts[target.output_ref] = _oci_layout_reference(layout, target.output_ref)
     return tuple(rendered)
+
+
+def _oci_layout_reference(layout: Path, image_reference: str) -> str:
+    try:
+        index = json.loads((layout / "index.json").read_text(encoding="utf-8"))
+        manifests = index["manifests"]
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise PlatformImagesError("nerdctl export does not contain a valid OCI index") from exc
+    if not isinstance(manifests, list):
+        raise PlatformImagesError("nerdctl OCI index manifests must be an array")
+    candidates = [
+        item
+        for item in manifests
+        if isinstance(item, dict) and item.get("mediaType") in IMAGE_MANIFEST_MEDIA_TYPES
+    ]
+    if len(candidates) != 1:
+        raise PlatformImagesError(
+            f"nerdctl OCI export for {image_reference!r} must contain exactly one image manifest"
+        )
+    digest = candidates[0].get("digest")
+    if _valid_digest(digest) is None:
+        raise PlatformImagesError(
+            f"nerdctl OCI export does not identify {image_reference!r} by sha256 digest"
+        )
+    # nerdctl's build-context parser accepts a layout path (not a digest-qualified URI), reads its
+    # index, and selects the image manifest. Requiring a single validated manifest above makes that
+    # independently selected descriptor unambiguous.
+    return f"oci-layout://{layout.resolve().as_posix()}"
 
 
 def _created_label(environment: Mapping[str, str]) -> str:
@@ -79,8 +188,8 @@ def _created_label(environment: Mapping[str, str]) -> str:
 
 
 def _result(target_name: str, output_ref: str, digest: str) -> dict[str, str]:
-    if not digest.startswith("sha256:"):
-        raise PlatformImagesError(f"podman returned an invalid image digest: {digest!r}")
+    if _valid_digest(digest) is None:
+        raise PlatformImagesError(f"container tooling returned an invalid image digest: {digest!r}")
     return {
         "target": target_name,
         "reference": output_ref,
@@ -90,15 +199,48 @@ def _result(target_name: str, output_ref: str, digest: str) -> dict[str, str]:
 
 
 def _inspect_digest(image: Mapping[str, object]) -> str:
-    digest = image.get("Digest")
-    if isinstance(digest, str) and digest.startswith("sha256:"):
-        return digest
-    repo_digests = image.get("RepoDigests")
-    if isinstance(repo_digests, list):
-        for reference in repo_digests:
-            if isinstance(reference, str) and "@sha256:" in reference:
-                return "sha256:" + reference.split("@sha256:", 1)[1]
+    for key in ("Digest", "FromImageDigest"):
+        digest = _valid_digest(image.get(key))
+        if digest is not None:
+            return digest
+    for key in ("RepoDigests", "repoDigests"):
+        repo_digests = image.get(key)
+        if isinstance(repo_digests, list):
+            for reference in repo_digests:
+                if isinstance(reference, str) and "@sha256:" in reference:
+                    digest = _valid_digest("sha256:" + reference.split("@sha256:", 1)[1])
+                    if digest is not None:
+                        return digest
     raise PlatformImagesError("existing image does not expose a registry digest")
+
+
+def _inspect_labels(image: Mapping[str, object]) -> Mapping[str, object] | None:
+    labels = image.get("Labels")
+    if isinstance(labels, dict):
+        return labels
+    for key in ("Config", "config"):
+        config = image.get(key)
+        if isinstance(config, dict) and isinstance(config.get("Labels"), dict):
+            return config["Labels"]  # type: ignore[return-value]
+    # Buildah exposes both Docker and OCI configuration views.
+    for key in ("Docker", "OCIv1"):
+        view = image.get(key)
+        if not isinstance(view, dict):
+            continue
+        config = view.get("config")
+        if isinstance(config, dict) and isinstance(config.get("Labels"), dict):
+            return config["Labels"]  # type: ignore[return-value]
+    return None
+
+
+def _inspection_image(parsed: object, transport: RegistryTransport) -> Mapping[str, object]:
+    if isinstance(parsed, list) and len(parsed) == 1 and isinstance(parsed[0], dict):
+        return parsed[0]
+    if transport is RegistryTransport.BUILDAH and isinstance(parsed, dict):
+        return parsed
+    raise PlatformImagesError(
+        f"{transport.value} returned an unexpected inspection result for an existing image"
+    )
 
 
 def _existing_ci_result(
@@ -108,35 +250,31 @@ def _existing_ci_result(
     output_ref: str,
     identity_labels: Mapping[str, str],
     root: Path,
-    engine: BuildEngine,
+    transport: RegistryTransport,
+    required: bool = False,
 ) -> dict[str, str] | None:
-    executable = engine.value
+    executable = transport.value
     try:
         process.run([executable, "pull", output_ref], cwd=root, capture_output=True)
-    except ProcessError:
+    except ProcessError as exc:
+        if required:
+            raise PlatformImagesError(
+                f"built image could not be pulled for digest verification: {output_ref}: {exc}"
+            ) from exc
         return None
     try:
-        result = process.run(
-            [executable, "image", "inspect", output_ref], cwd=root, capture_output=True
-        )
+        result = process.run(inspect_command(transport, output_ref), cwd=root, capture_output=True)
         parsed = json.loads(result.stdout)
+        image = _inspection_image(parsed, transport)
     except (ProcessError, json.JSONDecodeError) as exc:
         raise PlatformImagesError(
             f"output image already exists but its identity cannot be inspected: {output_ref}: {exc}"
         ) from exc
-    if not isinstance(parsed, list) or len(parsed) != 1 or not isinstance(parsed[0], dict):
-        raise PlatformImagesError(
-            f"podman returned an unexpected inspection result for existing image: {output_ref}"
-        )
-    image = parsed[0]
-    labels = image.get("Labels")
-    if not isinstance(labels, dict):
-        config = image.get("Config")
-        labels = config.get("Labels") if isinstance(config, dict) else None
+    labels = _inspect_labels(image)
     mismatches = [
         name
         for name, value in sorted(identity_labels.items())
-        if not isinstance(labels, dict) or labels.get(name) != value
+        if labels is None or labels.get(name) != value
     ]
     if mismatches:
         raise PlatformImagesError(
@@ -155,8 +293,21 @@ def execute_ci_build(
     root: Path,
     environment: Mapping[str, str] | None = None,
     runner: ProcessRunner | None = None,
-    engine: BuildEngine = BuildEngine.PODMAN,
+    builder: BuildBackend | None = None,
+    registry_transport: RegistryTransport | None = None,
+    engine: BuildBackend | None = None,
 ) -> dict[str, str]:
+    if builder is not None and engine is not None and builder is not engine:
+        raise ValueError("builder and legacy engine select different backends")
+    explicitly_selected = builder or engine
+    builder = builder or engine or BuildBackend.PODMAN
+    if registry_transport is None:
+        registry_transport = (
+            RegistryTransport(explicitly_selected.value)
+            if explicitly_selected is not None
+            else RegistryTransport.PODMAN
+        )
+    validate_execution_pair(builder, registry_transport)
     if target_name not in graph.targets:
         raise PlatformImagesError(f"unknown image target: {target_name}")
     expected = set(graph.dependencies[target_name])
@@ -201,7 +352,7 @@ def execute_ci_build(
         output_ref=output_ref,
         identity_labels=identity_labels,
         root=root,
-        engine=engine,
+        transport=registry_transport,
     ):
         return existing
     labels = {
@@ -210,13 +361,14 @@ def execute_ci_build(
     }
     with tempfile.TemporaryDirectory(prefix="platform-images-digest-") as directory:
         digest_file = Path(directory) / "digest"
-        if engine is BuildEngine.DOCKER:
+        strategy = BUILDERS[builder].push_strategy
+        if strategy is PushStrategy.BUILDX_METADATA:
             metadata_file = Path(directory) / "metadata.json"
             process.run(
                 build_command(
                     plan_target,
                     labels=labels,
-                    engine=engine,
+                    builder=builder,
                     push=True,
                     metadata_file=metadata_file,
                 ),
@@ -229,19 +381,40 @@ def execute_ci_build(
                 raise PlatformImagesError(
                     "docker buildx did not write a valid containerimage.digest"
                 ) from exc
-        else:
-            process.run(build_command(plan_target, labels=labels, engine=engine), cwd=root)
+        elif strategy is PushStrategy.DIRECT_INSPECT:
             process.run(
-                ["podman", "push", "--digestfile", str(digest_file), output_ref],
+                build_command(plan_target, labels=labels, builder=builder, push=True),
+                cwd=root,
+            )
+            verified = _existing_ci_result(
+                process,
+                target_name=target_name,
+                output_ref=output_ref,
+                identity_labels=identity_labels,
+                root=root,
+                transport=registry_transport,
+                required=True,
+            )
+            if verified is None:  # pragma: no cover - required=True makes this unreachable
+                raise AssertionError("required registry verification returned no result")
+            return verified
+        else:
+            process.run(build_command(plan_target, labels=labels, builder=builder), cwd=root)
+            process.run(
+                push_command(
+                    registry_transport,
+                    output_ref,
+                    digest_file=str(digest_file),
+                ),
                 cwd=root,
             )
             try:
                 digest = digest_file.read_text(encoding="utf-8").strip()
             except FileNotFoundError as exc:
                 raise PlatformImagesError(
-                    "podman push did not create the requested digest file"
+                    f"{registry_transport.value} push did not create the requested digest file"
                 ) from exc
-    if not isinstance(digest, str) or re.fullmatch(r"sha256:[0-9A-Fa-f]+", digest) is None:
+    if _valid_digest(digest) is None:
         raise PlatformImagesError(f"container engine returned an invalid image digest: {digest!r}")
     return _result(target_name, output_ref, digest)
 

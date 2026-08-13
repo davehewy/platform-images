@@ -5,9 +5,10 @@ import re
 from collections.abc import Mapping
 from pathlib import Path
 
+from platform_images.backends import TRANSPORTS
 from platform_images.config import RepositoryConfig
 from platform_images.errors import MissingStableImageError, ProcessError, RegistryError
-from platform_images.models import BuildEngine
+from platform_images.models import BuildBackend, RegistryTransport
 from platform_images.process import ProcessRunner
 from platform_images.references import ReferencePolicy, immutable_reference
 
@@ -113,7 +114,13 @@ class ECRRegistryClient(RegistryClient):
         return immutable_reference(stable, digest)
 
     def promote(self, source: str, destination: str) -> None:
-        _container_promote(source, destination, runner=self.runner, cwd=self.config.root)
+        _container_promote(
+            source,
+            destination,
+            transport=self.config.registry.transport,
+            runner=self.runner,
+            cwd=self.config.root,
+        )
 
 
 class ContainerRegistryClient(RegistryClient):
@@ -123,21 +130,21 @@ class ContainerRegistryClient(RegistryClient):
         self,
         cwd: Path,
         runner: ProcessRunner | None = None,
-        engine: BuildEngine = BuildEngine.PODMAN,
+        transport: RegistryTransport = RegistryTransport.PODMAN,
     ) -> None:
         self.cwd = cwd
         self.runner = runner or ProcessRunner()
-        self.engine = engine
+        self.transport = RegistryTransport(transport)
 
     def resolve_stable(self, target: str) -> str:
         del target
-        raise NotImplementedError("Podman transport does not resolve stable ECR tags")
+        raise NotImplementedError("container transports do not resolve stable ECR tags")
 
     def promote(self, source: str, destination: str) -> None:
         _container_promote(
             source,
             destination,
-            engine=self.engine,
+            transport=self.transport,
             runner=self.runner,
             cwd=self.cwd,
         )
@@ -163,8 +170,12 @@ def login_to_ecr(
     *,
     cwd: Path,
     runner: ProcessRunner | None = None,
-    engine: BuildEngine = BuildEngine.PODMAN,
+    transport: RegistryTransport | None = None,
+    engine: BuildBackend | None = None,
 ) -> None:
+    if transport is not None and engine is not None and transport.value != engine.value:
+        raise ValueError("transport and legacy engine select different executables")
+    transport = transport or RegistryTransport(engine.value if engine else "podman")
     normalized, _account, region = ecr_registry_coordinates(registry)
     process = runner or ProcessRunner()
     password = process.run(
@@ -175,7 +186,14 @@ def login_to_ecr(
     if not password.strip():
         raise RegistryError("AWS returned an empty ECR login password")
     process.run(
-        [engine.value, "login", "--username", "AWS", "--password-stdin", normalized],
+        [
+            TRANSPORTS[transport].executable,
+            "login",
+            "--username",
+            "AWS",
+            "--password-stdin",
+            normalized,
+        ],
         cwd=cwd,
         capture_output=True,
         input_text=password,
@@ -188,10 +206,10 @@ def _container_promote(
     *,
     runner: ProcessRunner | None = None,
     cwd: Path | None = None,
-    engine: BuildEngine = BuildEngine.PODMAN,
+    transport: RegistryTransport = RegistryTransport.PODMAN,
 ) -> None:
     process = runner or ProcessRunner()
-    executable = engine.value
+    executable = TRANSPORTS[transport].executable
     process.run([executable, "pull", source], cwd=cwd)
     process.run([executable, "tag", source, destination], cwd=cwd)
     process.run([executable, "push", destination], cwd=cwd)

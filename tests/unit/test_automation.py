@@ -6,6 +6,8 @@ from pathlib import Path
 
 import yaml
 
+from platform_images.backends import BUILDERS, TRANSPORTS
+
 ROOT = Path(__file__).parents[2]
 PINNED_ACTION = re.compile(r"^[^@]+@[0-9a-f]{40}$")
 
@@ -60,6 +62,20 @@ def test_github_actions_are_immutable_and_ci_gates_release() -> None:
     )
     assert "docker buildx version" in integration_script
     assert "podman info" in integration_script
+    assert "buildah info" in integration_script
+    assert "nerdctl-full-" in integration_script
+    assert (
+        len(
+            next(
+                step["env"]["NERDCTL_FULL_LINUX_AMD64_SHA256"]
+                for step in integration["steps"]
+                if step.get("name") == "Install pinned nerdctl full distribution"
+            )
+        )
+        == 64
+    )
+    assert "platform-images-containerd" in integration_script
+    assert "buildctl debug workers" in integration_script
 
 
 def test_release_workflow_builds_all_supported_standalone_platforms() -> None:
@@ -176,3 +192,15 @@ def test_pre_commit_installs_commit_message_and_pre_push_gates() -> None:
     hooks = {hook["id"]: hook for repository in config["repos"] for hook in repository["hooks"]}
     assert hooks["commitizen"]["stages"] == ["commit-msg"]
     assert hooks["unit-tests"]["stages"] == ["pre-push"]
+
+
+def test_documented_backend_matrix_covers_every_implemented_capability() -> None:
+    documentation = (ROOT / "docs" / "container-backends.md").read_text(encoding="utf-8")
+
+    for backend, capabilities in BUILDERS.items():
+        assert backend.value in documentation
+        assert capabilities.minimum_version in documentation
+        assert capabilities.context_scheme in documentation
+    for transport, capabilities in TRANSPORTS.items():
+        assert transport.value in documentation
+        assert capabilities.minimum_version in documentation

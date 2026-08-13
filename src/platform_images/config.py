@@ -5,8 +5,9 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+from platform_images.backends import default_transport, validate_execution_pair
 from platform_images.errors import ConfigurationError
-from platform_images.models import BuildEngine
+from platform_images.models import BuildBackend, RegistryTransport
 
 NAMESPACE_RE = re.compile(r"^[a-z0-9]+(?:[._/-][a-z0-9]+)*$")
 
@@ -16,6 +17,7 @@ class RegistryConfig:
     namespace: str
     registry_environment_variable: str
     stable_tag: str
+    transport: RegistryTransport
 
 
 @dataclass(frozen=True)
@@ -35,8 +37,18 @@ class DockerfileConfig:
 
 
 @dataclass(frozen=True)
+class DiscoveryConfig:
+    root: str
+
+
+@dataclass(frozen=True)
 class BuildConfig:
-    engine: BuildEngine
+    backend: BuildBackend
+
+    @property
+    def engine(self) -> BuildBackend:
+        """Backward-compatible name for the pre-v0.5 combined execution setting."""
+        return self.backend
 
 
 @dataclass(frozen=True)
@@ -46,6 +58,7 @@ class RepositoryConfig:
     tags: TagConfig
     changes: ChangeConfig
     dockerfile: DockerfileConfig
+    discovery: DiscoveryConfig
     build: BuildConfig
 
     @classmethod
@@ -66,19 +79,38 @@ class RepositoryConfig:
             tag_data = data["tags"]
             change_data = data["changes"]
             dockerfile_data = data.get("dockerfile", {})
+            discovery_data = data.get("discovery", {})
             build_data = data.get("build", {})
-            registry = RegistryConfig(
-                namespace=str(registry_data["namespace"]),
-                registry_environment_variable=str(registry_data["registry_environment_variable"]),
-                stable_tag=str(registry_data["stable_tag"]),
-            )
             tags = TagConfig(
                 ci_prefix=str(tag_data["ci_prefix"]),
                 commit_prefix=str(tag_data["commit_prefix"]),
             )
             raw_global_inputs = change_data["global_inputs"]
             raw_external_images = dockerfile_data.get("allowed_short_external_images", ())
-            engine = BuildEngine(str(build_data.get("engine", BuildEngine.PODMAN.value)))
+            discovery_root = str(discovery_data.get("root", "images"))
+            legacy_engine = build_data.get("engine")
+            configured_backend = build_data.get("backend")
+            if legacy_engine is not None and configured_backend is not None:
+                raise TypeError("build.engine and build.backend cannot both be set")
+            backend = BuildBackend(
+                str(
+                    configured_backend
+                    if configured_backend is not None
+                    else legacy_engine
+                    if legacy_engine is not None
+                    else BuildBackend.PODMAN.value
+                )
+            )
+            transport = RegistryTransport(
+                str(registry_data.get("transport", default_transport(backend).value))
+            )
+            registry = RegistryConfig(
+                namespace=str(registry_data["namespace"]),
+                registry_environment_variable=str(registry_data["registry_environment_variable"]),
+                stable_tag=str(registry_data["stable_tag"]),
+                transport=transport,
+            )
+            validate_execution_pair(backend, transport, configuration=True)
             if not isinstance(raw_global_inputs, list) or not all(
                 isinstance(item, str) for item in raw_global_inputs
             ):
@@ -114,11 +146,26 @@ class RepositoryConfig:
                 "allowed_short_external_images entries must be unqualified repository names: "
                 + ", ".join(invalid_external_names)
             )
+        discovery_path = Path(discovery_root)
+        if (
+            not discovery_root
+            or discovery_path.is_absolute()
+            or discovery_path in {Path("."), Path("..")}
+            or ".." in discovery_path.parts
+        ):
+            raise ConfigurationError(
+                "discovery.root must be a non-empty repository-relative directory"
+            )
+        try:
+            (root / discovery_path).resolve().relative_to(root)
+        except ValueError as exc:
+            raise ConfigurationError("discovery.root resolves outside the repository") from exc
         return cls(
             root=root,
             registry=registry,
             tags=tags,
             changes=ChangeConfig(global_inputs),
             dockerfile=DockerfileConfig(allowed_short_external_images),
-            build=BuildConfig(engine),
+            discovery=DiscoveryConfig(discovery_path.as_posix()),
+            build=BuildConfig(backend),
         )

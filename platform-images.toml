@@ -2,13 +2,17 @@
 namespace = "platform-images"
 registry_environment_variable = "PLATFORM_IMAGES_REGISTRY"
 stable_tag = "main"
+transport = "podman"
 
 [tags]
 ci_prefix = "ci"
 commit_prefix = "sha"
 
 [build]
-engine = "podman"
+backend = "podman"
+
+[discovery]
+root = "images"
 
 [dockerfile]
 allowed_short_external_images = ["alpine", "busybox"]

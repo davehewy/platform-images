@@ -5,13 +5,14 @@ Generate a complete workflow from the validated image graph:
 ```bash
 platform images generate-workflow github \
   --default-branch main \
-  --engine docker \
+  --builder docker \
+  --registry-transport docker \
   --output .github/workflows/container-images.yml
 ```
 
 Commit the generated file. Run the command again whenever a `Dockerfile` or `Containerfile` changes
 the depth of the local dependency graph, when the default branch or runner changes, or when moving
-between Docker and Podman. The generated header records that contract.
+between container backends. The generated header records that contract.
 
 ## Why the workflow uses layers
 
@@ -52,7 +53,7 @@ The workflow contains:
   succeeded.
 
 The plan artifact contains exact output tags and exact local dependency inputs. Build jobs push
-before completing, so separate runners do not need a shared Docker or Podman image store. Promotion
+before completing, so separate runners do not need a shared container image store. Promotion
 is graph-wide: no affected `main` alias changes until every affected image is available.
 
 ## Required repository variables
@@ -81,12 +82,15 @@ platform images generate-workflow github \
 `ambient` means the runner must already expose short-lived AWS credentials to AWS CLI. It does not
 mean anonymous registry access.
 
-## Docker or Podman
+## Container backend selection
 
 Docker is the generated default because GitHub-hosted Ubuntu runners provide Docker and Buildx:
 
 ```bash
-platform images generate-workflow github --engine docker --output .github/workflows/images.yml
+platform images generate-workflow github \
+  --builder docker \
+  --registry-transport docker \
+  --output .github/workflows/images.yml
 ```
 
 Docker builds with `docker buildx build --push` and obtains the pushed registry digest from the
@@ -100,8 +104,27 @@ platform images generate-workflow github --engine podman --output .github/workfl
 ```
 
 The generated Ubuntu workflow installs Podman. Podman builds use `container-image://` contexts and
-record the pushed digest through `podman push --digestfile`. Both engines apply the same OCI source,
-revision, target, dependency-input, and creation labels.
+record the pushed digest through `podman push --digestfile`.
+
+Buildah is another daemonless containers-storage builder and transport:
+
+```bash
+platform images generate-workflow github --engine buildah --output .github/workflows/images.yml
+```
+
+For a preconfigured containerd runner with BuildKit running:
+
+```bash
+platform images generate-workflow github \
+  --runner self-hosted \
+  --engine nerdctl \
+  --output .github/workflows/images.yml
+```
+
+The generated Ubuntu workflow installs Podman and/or Buildah when selected. It verifies nerdctl,
+containerd, and BuildKit but deliberately does not replace a self-hosted runner's containerd
+topology. All supported pairs apply the same OCI source, revision, target, dependency-input, and
+creation labels. See [container backends](container-backends.md) for versions and valid pairings.
 
 ## Pull-request trust boundary
 
@@ -126,7 +149,9 @@ Normal push and pull-request runs leave it false and calculate the minimal affec
 | --- | --- |
 | `--default-branch <name>` | Sets the push trigger and the branch whose successful plans may promote stable aliases. |
 | `--runner <label>` | Sets `runs-on` for every generated job. One simple label is supported. |
-| `--engine docker\|podman` | Selects the build, login, retry, and promotion executable. |
+| `--builder docker\|podman\|buildah\|nerdctl` | Selects the build implementation. Docker remains the generated default. |
+| `--registry-transport docker\|podman\|buildah\|nerdctl` | Selects login, retry inspection, push, and promotion tooling. |
+| `--engine <name>` | Backward-compatible shorthand selecting the same supported tool for both axes. |
 | `--aws-auth oidc\|ambient` | Emits the pinned AWS credentials action and `id-token: write`, or relies on runner credentials. |
 | `--aws-role-variable <name>` | Changes the GitHub variable containing the OIDC role ARN. |
 | `--aws-region-variable <name>` | Changes the GitHub variable containing the OIDC region. |

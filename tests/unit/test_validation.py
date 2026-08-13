@@ -57,6 +57,68 @@ def test_build_engine_configuration_is_validated(
         RepositoryConfig.load(root)
 
 
+def test_builder_and_registry_transport_are_independent_but_storage_compatible(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory({"base": "FROM alpine\n"})
+    config_path = root / "platform-images.toml"
+    contents = config_path.read_text(encoding="utf-8").replace(
+        'engine = "podman"', 'backend = "buildah"'
+    )
+    contents = contents.replace('stable_tag = "main"', 'stable_tag = "main"\ntransport = "podman"')
+    config_path.write_text(contents, encoding="utf-8")
+
+    config = RepositoryConfig.load(root)
+
+    assert config.build.backend.value == "buildah"
+    assert config.registry.transport.value == "podman"
+
+
+def test_incompatible_builder_and_registry_storage_are_rejected(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory({"base": "FROM alpine\n"})
+    config_path = root / "platform-images.toml"
+    contents = config_path.read_text(encoding="utf-8").replace(
+        'engine = "podman"', 'backend = "nerdctl"'
+    )
+    contents = contents.replace('stable_tag = "main"', 'stable_tag = "main"\ntransport = "docker"')
+    config_path.write_text(contents, encoding="utf-8")
+
+    with pytest.raises(ConfigurationError, match="cannot use registry transport"):
+        RepositoryConfig.load(root)
+
+
+def test_discovery_root_is_repository_relative(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory({"base": "FROM alpine\n"})
+    config_path = root / "platform-images.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8") + '\n[discovery]\nroot = "../images"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="repository-relative"):
+        RepositoryConfig.load(root)
+
+
+def test_missing_configured_discovery_root_fails_closed(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory({"base": "FROM alpine\n"})
+    config_path = root / "platform-images.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        + '\n[discovery]\nroot = "missing/container-images"\n',
+        encoding="utf-8",
+    )
+
+    report = validate_repository(RepositoryConfig.load(root))
+
+    assert {issue.code for issue in report.errors} == {"missing-discovery-root"}
+
+
 def test_unresolved_reference_has_stable_code(
     repository_factory: Callable[[dict[str, str]], Path],
 ) -> None:

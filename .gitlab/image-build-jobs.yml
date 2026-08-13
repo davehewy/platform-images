@@ -1,8 +1,11 @@
+variables:
+  PLATFORM_IMAGES_RUNNER_TAG: "podman"
+
 .image-build:
   stage: build
   interruptible: true
   tags:
-    - podman
+    - $PLATFORM_IMAGES_RUNNER_TAG
   before_script:
     - platform images validate
     - platform images registry-login

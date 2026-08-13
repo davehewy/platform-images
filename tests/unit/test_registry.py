@@ -7,7 +7,7 @@ import pytest
 
 from platform_images.config import RepositoryConfig
 from platform_images.errors import MissingStableImageError, ProcessError, RegistryError
-from platform_images.models import BuildEngine
+from platform_images.models import RegistryTransport
 from platform_images.process import ProcessResult
 from platform_images.references import ReferencePolicy, immutable_reference
 from platform_images.registry import (
@@ -137,7 +137,7 @@ def test_docker_promotion_is_pull_tag_push() -> None:
     ContainerRegistryClient(
         Path.cwd(),
         runner,
-        BuildEngine.DOCKER,  # type: ignore[arg-type]
+        RegistryTransport.DOCKER,  # type: ignore[arg-type]
     ).promote("registry/base:sha-a", "registry/base:main")
     assert runner.commands == [
         ["docker", "pull", "registry/base:sha-a"],
@@ -174,7 +174,7 @@ def test_ecr_login_supports_docker_password_stdin() -> None:
         registry,
         cwd=Path.cwd(),
         runner=runner,  # type: ignore[arg-type]
-        engine=BuildEngine.DOCKER,
+        transport=RegistryTransport.DOCKER,
     )
 
     assert runner.commands[-1] == [
@@ -185,3 +185,46 @@ def test_ecr_login_supports_docker_password_stdin() -> None:
         "--password-stdin",
         registry,
     ]
+
+
+@pytest.mark.parametrize(
+    "transport",
+    (RegistryTransport.NERDCTL, RegistryTransport.BUILDAH),
+)
+def test_ecr_login_supports_additional_password_stdin_transports(
+    transport: RegistryTransport,
+) -> None:
+    runner = RegistryRunner("secret-token\n")
+    registry = "123456789012.dkr.ecr.eu-west-2.amazonaws.com"
+
+    login_to_ecr(
+        registry,
+        cwd=Path.cwd(),
+        runner=runner,  # type: ignore[arg-type]
+        transport=transport,
+    )
+
+    assert runner.commands[-1] == [
+        transport.value,
+        "login",
+        "--username",
+        "AWS",
+        "--password-stdin",
+        registry,
+    ]
+
+
+@pytest.mark.parametrize("transport", (RegistryTransport.NERDCTL, RegistryTransport.BUILDAH))
+def test_additional_promotion_transports_are_pull_tag_push(
+    transport: RegistryTransport,
+) -> None:
+    runner = RegistryRunner()
+
+    ContainerRegistryClient(
+        Path.cwd(),
+        runner,
+        transport,  # type: ignore[arg-type]
+    ).promote("registry/base:sha-a", "registry/base:main")
+
+    assert [command[0] for command in runner.commands] == [transport.value] * 3
+    assert [command[1] for command in runner.commands] == ["pull", "tag", "push"]

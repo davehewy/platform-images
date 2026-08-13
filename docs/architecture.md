@@ -1,12 +1,13 @@
 # Architecture
 
-The controller is intentionally thin. Docker Buildx or Podman builds, GitHub Actions or GitLab
-schedules, and ECR stores images. The Python package makes repository conventions explicit and
-testable.
+The controller is intentionally thin. A supported container backend builds, GitHub Actions or
+GitLab schedules, and ECR stores images. The Python package makes repository conventions explicit
+and testable.
 
 ## Data flow
 
-1. **Discovery** maps every direct `images/<name>` directory to an immutable `ImageTarget`.
+1. **Discovery** maps every direct child of configurable `discovery.root` to an immutable
+   `ImageTarget`. The default root is `images`, but nested repository-relative roots are supported.
 2. **Parser** reads logical Dockerfile/Containerfile instructions, global `ARG` defaults, `FROM` sources, stage
    aliases, `COPY`/`ADD --from` sources, and `RUN --mount=from` sources while excluding heredoc
    bodies. It distinguishes local, external, stage, and unresolved references.
@@ -22,8 +23,9 @@ testable.
 6. **Affected calculation** follows downstream dependents from directly changed images.
 7. **Planner** topologically orders only the rebuild set and resolves every output, dependency
    input, reason, and in-plan `needs` edge without building anything.
-8. **Executor** translates plan targets into argument-array Docker Buildx or Podman calls. Logical
-   dependencies are bound through named `docker-image://` or `container-image://` contexts.
+8. **Executor** translates plan targets into argument-array Docker Buildx, Podman, Buildah, or
+   nerdctl calls. Logical dependencies are bound through exact named `docker-image://` or
+   `container-image://` contexts.
 9. **GitLab renderer** strictly reloads the saved JSON plan, verifies it against the discovered
    graph, and safely serializes jobs. Direct dependencies become `needs`; an empty plan becomes a
    successful no-op job.
@@ -31,10 +33,11 @@ testable.
     dependency-safe layers of the affected plan. The saved plan is passed as an artifact and
     strictly revalidated in every matrix build.
 11. **Registry adapter** resolves stable ECR tags in the account and region encoded by the registry
-    hostname, pushes with `--digestfile`, and gates stable promotion behind one graph-wide job.
+    hostname. Builder capabilities determine direct or local output; transport capabilities own
+    authentication, inspection, digest capture, and promotion behind one graph-wide job.
 
-Core graph, change, planning, and rendering code never invokes Git, Docker, Podman, AWS, or the registry.
-Those processes sit behind small injectable adapters so unit tests use recorded inputs.
+Core graph, change, planning, and rendering code never invokes Git, container tooling, AWS, or the
+registry. Those processes sit behind small injectable adapters so unit tests use recorded inputs.
 
 ## DAG invariant
 

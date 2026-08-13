@@ -7,10 +7,11 @@ from collections.abc import Mapping
 import yaml
 
 from platform_images import __version__
+from platform_images.backends import validate_execution_pair
 from platform_images.config import RepositoryConfig
 from platform_images.errors import PlatformImagesError
 from platform_images.graph import ImageGraph
-from platform_images.models import BuildEngine, BuildPlan
+from platform_images.models import BuildBackend, BuildPlan, RegistryTransport
 
 CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"  # v7.0.1
 UPLOAD_ARTIFACT = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"  # v7.0.1
@@ -118,15 +119,37 @@ def _artifact_download_step() -> dict[str, object]:
     }
 
 
-def _engine_steps(engine: BuildEngine) -> list[dict[str, object]]:
-    if engine is BuildEngine.DOCKER:
+def _runtime_steps(builder: BuildBackend, transport: RegistryTransport) -> list[dict[str, object]]:
+    required = {builder.value, transport.value}
+    if required == {BuildBackend.DOCKER.value}:
         return [{"name": "Verify Docker Buildx", "run": "docker buildx version"}]
-    return [
-        {
-            "name": "Install Podman",
-            "run": ("sudo apt-get update\nsudo apt-get install --yes podman\npodman info"),
-        }
-    ]
+    packages = sorted(required & {BuildBackend.PODMAN.value, BuildBackend.BUILDAH.value})
+    steps: list[dict[str, object]] = []
+    if packages:
+        steps.append(
+            {
+                "name": "Install containers-storage tooling",
+                "run": ("sudo apt-get update\nsudo apt-get install --yes " + " ".join(packages)),
+            }
+        )
+    for executable in sorted(required):
+        if executable == BuildBackend.DOCKER.value:
+            steps.append({"name": "Verify Docker Buildx", "run": "docker buildx version"})
+        elif executable == BuildBackend.NERDCTL.value:
+            steps.append(
+                {
+                    "name": "Verify nerdctl, containerd, and BuildKit",
+                    "run": "nerdctl version\nnerdctl info\nbuildctl --version",
+                }
+            )
+        else:
+            steps.append(
+                {
+                    "name": f"Verify {executable}",
+                    "run": f"{executable} version\n{executable} info",
+                }
+            )
+    return steps
 
 
 def _valid_variable(name: str, option: str) -> None:
@@ -140,11 +163,24 @@ def render_github_workflow(
     *,
     default_branch: str = "main",
     runner: str = "ubuntu-latest",
-    engine: BuildEngine = BuildEngine.DOCKER,
+    builder: BuildBackend | None = None,
+    registry_transport: RegistryTransport | None = None,
+    engine: BuildBackend | None = None,
     aws_auth: str = "oidc",
     aws_role_variable: str = "AWS_ROLE_TO_ASSUME",
     aws_region_variable: str = "AWS_REGION",
 ) -> str:
+    if builder is not None and engine is not None and builder is not engine:
+        raise ValueError("builder and legacy engine select different backends")
+    explicitly_selected = builder or engine
+    builder = builder or engine or BuildBackend.DOCKER
+    if registry_transport is None:
+        registry_transport = (
+            RegistryTransport(explicitly_selected.value)
+            if explicitly_selected is not None
+            else RegistryTransport.DOCKER
+        )
+    validate_execution_pair(builder, registry_transport)
     if not default_branch or not runner:
         raise PlatformImagesError("default branch and runner must not be empty")
     if aws_auth not in {"oidc", "ambient"}:
@@ -259,19 +295,26 @@ def render_github_workflow(
                 {**_checkout_step(), "if": "matrix.target != ''"},
                 {**_install_step(), "if": "matrix.target != ''"},
                 *[{**step, "if": "matrix.target != ''"} for step in auth_steps],
-                *[{**step, "if": "matrix.target != ''"} for step in _engine_steps(engine)],
+                *[
+                    {**step, "if": "matrix.target != ''"}
+                    for step in _runtime_steps(builder, registry_transport)
+                ],
                 {**_artifact_download_step(), "if": "matrix.target != ''"},
                 {
-                    "name": "Authenticate container engine to ECR",
+                    "name": "Authenticate registry transport to ECR",
                     "if": "matrix.target != ''",
-                    "run": f"platform images registry-login --engine {engine.value}",
+                    "run": (
+                        "platform images registry-login --registry-transport "
+                        f"{registry_transport.value}"
+                    ),
                 },
                 {
                     "name": "Build and push exact planned target",
                     "if": "matrix.target != ''",
                     "run": (
                         "platform images build-plan-target .platform-images/image-plan.json "
-                        f'"${{{{ matrix.target }}}}" --engine {engine.value}'
+                        f'"${{{{ matrix.target }}}}" --builder {builder.value} '
+                        f"--registry-transport {registry_transport.value}"
                     ),
                 },
             ],
@@ -294,17 +337,20 @@ def render_github_workflow(
             _checkout_step(),
             _install_step(),
             *auth_steps,
-            *_engine_steps(engine),
+            *_runtime_steps(builder, registry_transport),
             _artifact_download_step(),
             {
-                "name": "Authenticate container engine to ECR",
-                "run": f"platform images registry-login --engine {engine.value}",
+                "name": "Authenticate registry transport to ECR",
+                "run": (
+                    "platform images registry-login --registry-transport "
+                    f"{registry_transport.value}"
+                ),
             },
             {
                 "name": "Promote only after every affected image succeeds",
                 "run": (
                     "platform images promote-plan .platform-images/image-plan.json "
-                    f"--engine {engine.value}"
+                    f"--registry-transport {registry_transport.value}"
                 ),
             },
         ],

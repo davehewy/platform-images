@@ -7,6 +7,7 @@ import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+from platform_images.backends import default_transport, validate_execution_pair
 from platform_images.build import (
     execute_ci_build,
     execute_local_plan,
@@ -22,7 +23,13 @@ from platform_images.changes import (
 from platform_images.config import RepositoryConfig
 from platform_images.discovery import discover_targets
 from platform_images.errors import PlatformImagesError
-from platform_images.models import BuildEngine, BuildMode, BuildPlan, ChangeSet
+from platform_images.models import (
+    BuildBackend,
+    BuildMode,
+    BuildPlan,
+    ChangeSet,
+    RegistryTransport,
+)
 from platform_images.planner import (
     affected_reasons,
     all_ci_plan,
@@ -74,7 +81,12 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("name")
     build.add_argument("--dry-run", action="store_true")
     build.add_argument("--no-deps", action="store_true")
-    build.add_argument("--engine", choices=tuple(engine.value for engine in BuildEngine))
+    build.add_argument("--builder", choices=tuple(item.value for item in BuildBackend))
+    build.add_argument(
+        "--engine",
+        choices=tuple(item.value for item in BuildBackend),
+        help="backward-compatible shorthand for --builder",
+    )
 
     for name in ("changed", "affected"):
         command = commands.add_parser(name)
@@ -98,26 +110,24 @@ def _parser() -> argparse.ArgumentParser:
     ci_build.add_argument("name")
     ci_build.add_argument("--output-ref", required=True)
     ci_build.add_argument("--input-ref", action="append", default=[])
-    ci_build.add_argument("--engine", choices=tuple(engine.value for engine in BuildEngine))
+    _execution_arguments(ci_build)
 
     registry_login = commands.add_parser("registry-login")
-    registry_login.add_argument("--engine", choices=tuple(engine.value for engine in BuildEngine))
+    _transport_arguments(registry_login)
 
     promote_parser = commands.add_parser("promote")
     promote_parser.add_argument("--source", required=True)
     promote_parser.add_argument("--destination", required=True)
-    promote_parser.add_argument("--engine", choices=tuple(engine.value for engine in BuildEngine))
+    _transport_arguments(promote_parser)
 
     build_plan_target = commands.add_parser("build-plan-target")
     build_plan_target.add_argument("plan_file", type=Path)
     build_plan_target.add_argument("name")
-    build_plan_target.add_argument(
-        "--engine", choices=tuple(engine.value for engine in BuildEngine)
-    )
+    _execution_arguments(build_plan_target)
 
     promote_plan = commands.add_parser("promote-plan")
     promote_plan.add_argument("plan_file", type=Path)
-    promote_plan.add_argument("--engine", choices=tuple(engine.value for engine in BuildEngine))
+    _transport_arguments(promote_plan)
 
     github_matrix = commands.add_parser("github-matrix")
     github_matrix.add_argument("plan_file", type=Path)
@@ -127,16 +137,37 @@ def _parser() -> argparse.ArgumentParser:
     workflow.add_argument("provider", choices=("github",))
     workflow.add_argument("--default-branch", default="main")
     workflow.add_argument("--runner", default="ubuntu-latest")
-    workflow.add_argument(
-        "--engine",
-        choices=tuple(engine.value for engine in BuildEngine),
-        default=BuildEngine.DOCKER.value,
-    )
+    _execution_arguments(workflow)
     workflow.add_argument("--aws-auth", choices=("oidc", "ambient"), default="oidc")
     workflow.add_argument("--aws-role-variable", default="AWS_ROLE_TO_ASSUME")
     workflow.add_argument("--aws-region-variable", default="AWS_REGION")
     workflow.add_argument("--output", type=Path)
     return parser
+
+
+def _execution_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--builder", choices=tuple(item.value for item in BuildBackend))
+    parser.add_argument(
+        "--registry-transport",
+        choices=tuple(item.value for item in RegistryTransport),
+    )
+    parser.add_argument(
+        "--engine",
+        choices=tuple(item.value for item in BuildBackend),
+        help="backward-compatible shorthand selecting a matching builder and transport",
+    )
+
+
+def _transport_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--registry-transport",
+        choices=tuple(item.value for item in RegistryTransport),
+    )
+    parser.add_argument(
+        "--engine",
+        choices=tuple(item.value for item in BuildBackend),
+        help="backward-compatible shorthand for --registry-transport",
+    )
 
 
 def _root(arguments: argparse.Namespace, cwd: Path | None) -> Path:
@@ -256,9 +287,58 @@ def _registry_client(config: RepositoryConfig, registry: str, env: Mapping[str, 
     return static or ECRRegistryClient(config, registry)
 
 
-def _engine(arguments: argparse.Namespace, config: RepositoryConfig) -> BuildEngine:
-    selected = getattr(arguments, "engine", None)
-    return BuildEngine(selected) if selected else config.build.engine
+def _builder(
+    arguments: argparse.Namespace,
+    config: RepositoryConfig,
+    *,
+    default: BuildBackend | None = None,
+) -> BuildBackend:
+    selected = getattr(arguments, "builder", None)
+    legacy = getattr(arguments, "engine", None)
+    if selected is not None and legacy is not None and selected != legacy:
+        raise PlatformImagesError("--builder and --engine select different build backends")
+    if selected or legacy:
+        return BuildBackend(selected or legacy)
+    return default or config.build.backend
+
+
+def _transport(
+    arguments: argparse.Namespace,
+    config: RepositoryConfig,
+    *,
+    default: RegistryTransport | None = None,
+) -> RegistryTransport:
+    selected = getattr(arguments, "registry_transport", None)
+    legacy = getattr(arguments, "engine", None)
+    if selected is not None and legacy is not None and selected != legacy:
+        raise PlatformImagesError(
+            "--registry-transport and --engine select different registry transports"
+        )
+    if selected or legacy:
+        return RegistryTransport(selected or legacy)
+    return default or config.registry.transport
+
+
+def _execution(
+    arguments: argparse.Namespace,
+    config: RepositoryConfig,
+    *,
+    default_builder: BuildBackend | None = None,
+) -> tuple[BuildBackend, RegistryTransport]:
+    builder = _builder(arguments, config, default=default_builder)
+    no_overrides = not any(
+        getattr(arguments, name, None) for name in ("builder", "registry_transport", "engine")
+    )
+    transport_default = (
+        default_transport(builder) if default_builder is not None and no_overrides else None
+    )
+    transport = _transport(
+        arguments,
+        config,
+        default=transport_default,
+    )
+    validate_execution_pair(builder, transport)
+    return builder, transport
 
 
 def _load_plan(path: Path, graph, config: RepositoryConfig) -> BuildPlan:
@@ -355,7 +435,7 @@ def _create_plan(
 def _run(arguments: argparse.Namespace, cwd: Path | None, environment: Mapping[str, str]) -> int:
     root = _root(arguments, cwd)
     config = RepositoryConfig.load(root)
-    targets = discover_targets(root)
+    targets = discover_targets(root, config.discovery.root)
 
     if arguments.command == "list":
         print("\n".join(sorted(targets)))
@@ -400,14 +480,14 @@ def _run(arguments: argparse.Namespace, cwd: Path | None, environment: Mapping[s
             plan,
             root=root,
             dry_run=arguments.dry_run,
-            engine=_engine(arguments, config),
+            builder=_builder(arguments, config),
         )
         if arguments.dry_run:
             print("\n".join(commands))
         return 0
     if arguments.command in {"changed", "affected"}:
         changes = detect_changes(config, graph.targets, arguments.base, arguments.head)
-        validate_removed_references(graph, changes)
+        validate_removed_references(graph, changes, config.root)
         if arguments.command == "changed":
             if arguments.format == "json":
                 print(json.dumps(_changes_data(changes), indent=2))
@@ -462,6 +542,7 @@ def _run(arguments: argparse.Namespace, cwd: Path | None, environment: Mapping[s
             print(render_gitlab(plan, config, registry), end="")
         return 0
     if arguments.command == "ci-build":
+        builder, transport = _execution(arguments, config)
         result = execute_ci_build(
             graph,
             arguments.name,
@@ -469,7 +550,8 @@ def _run(arguments: argparse.Namespace, cwd: Path | None, environment: Mapping[s
             parse_input_references(arguments.input_ref),
             root=root,
             environment=environment,
-            engine=_engine(arguments, config),
+            builder=builder,
+            registry_transport=transport,
         )
         print(result_json(result))
         return 0
@@ -479,16 +561,21 @@ def _run(arguments: argparse.Namespace, cwd: Path | None, environment: Mapping[s
             raise PlatformImagesError(
                 f"{config.registry.registry_environment_variable} is required for registry login"
             )
-        engine = _engine(arguments, config)
-        login_to_ecr(registry, cwd=root, engine=engine)
+        transport = _transport(arguments, config)
+        login_to_ecr(registry, cwd=root, transport=transport)
         print(
             json.dumps(
-                {"registry": registry.rstrip("/"), "authenticated": True, "engine": engine.value}
+                {
+                    "registry": registry.rstrip("/"),
+                    "authenticated": True,
+                    "engine": transport.value,
+                    "registry_transport": transport.value,
+                }
             )
         )
         return 0
     if arguments.command == "promote":
-        ContainerRegistryClient(root, engine=_engine(arguments, config)).promote(
+        ContainerRegistryClient(root, transport=_transport(arguments, config)).promote(
             arguments.source, arguments.destination
         )
         print(
@@ -505,6 +592,7 @@ def _run(arguments: argparse.Namespace, cwd: Path | None, environment: Mapping[s
         target = next((target for target in plan.targets if target.name == arguments.name), None)
         if target is None:
             raise PlatformImagesError(f"target is not present in persisted plan: {arguments.name}")
+        builder, transport = _execution(arguments, config)
         result = execute_ci_build(
             graph,
             target.name,
@@ -512,7 +600,8 @@ def _run(arguments: argparse.Namespace, cwd: Path | None, environment: Mapping[s
             target.input_refs,
             root=root,
             environment=environment,
-            engine=_engine(arguments, config),
+            builder=builder,
+            registry_transport=transport,
         )
         print(result_json(result))
         return 0
@@ -525,7 +614,7 @@ def _run(arguments: argparse.Namespace, cwd: Path | None, environment: Mapping[s
             raise PlatformImagesError(
                 f"{config.registry.registry_environment_variable} is required for promotion"
             )
-        transport = ContainerRegistryClient(root, engine=_engine(arguments, config))
+        transport = ContainerRegistryClient(root, transport=_transport(arguments, config))
         policy = ReferencePolicy(config, registry)
         for target in plan.targets:
             transport.promote(target.output_ref, policy.stable(target.name))
@@ -538,12 +627,18 @@ def _run(arguments: argparse.Namespace, cwd: Path | None, environment: Mapping[s
         print(render_github_outputs(plan, arguments.max_layers))
         return 0
     if arguments.command == "generate-workflow":
+        builder, transport = _execution(
+            arguments,
+            config,
+            default_builder=BuildBackend.DOCKER,
+        )
         rendered = render_github_workflow(
             graph,
             config,
             default_branch=arguments.default_branch,
             runner=arguments.runner,
-            engine=BuildEngine(arguments.engine),
+            builder=builder,
+            registry_transport=transport,
             aws_auth=arguments.aws_auth,
             aws_role_variable=arguments.aws_role_variable,
             aws_region_variable=arguments.aws_region_variable,

@@ -26,12 +26,13 @@ information already exists in instructions such as `FROM base`, but normal CI pa
 understand it. They also do not solve how independently scheduled jobs pass the exact newly built
 parent image to their consumers.
 
-This tool discovers `images/<name>/Dockerfile` or `images/<name>/Containerfile` targets, infers
+This tool discovers one target per direct directory beneath a configurable repository-relative
+root (`images` by default). Each target can use either `Dockerfile` or `Containerfile`. It infers
 their **build-time** dependency graph, maps a Git diff onto that graph, and follows changes
 downstream. It can render dynamic GitLab child-pipeline jobs or generate a complete GitHub Actions
-workflow. Docker and Podman are both supported build engines. Every build receives exact image
-references, and a default-branch pipeline promotes the affected graph to stable tags only after the
-complete graph build succeeds.
+workflow. Docker Buildx, Podman, Buildah, and nerdctl/BuildKit are supported explicitly. Every
+build receives exact image references, and a default-branch pipeline promotes the affected graph
+to stable tags only after the complete graph build succeeds.
 
 There is no second image catalogue or hand-maintained CI dependency list. The Dockerfiles or
 Containerfiles and Git history remain the source of truth.
@@ -50,6 +51,7 @@ before consumers, while unrelated nodes remain parallelizable.
 - [Demonstration](#demonstration)
 - [Worked examples](#worked-examples)
 - [Configuration capabilities](#configuration-capabilities)
+- [Container backend compatibility](docs/container-backends.md)
 - [Recommended adoption flow](#recommended-adoption-flow)
 - [Command guide](#command-guide)
 - [CI operating model](#ci-operating-model)
@@ -70,7 +72,8 @@ For a platform or DevOps team, it solves:
   existing stable parent;
 - turning the calculated graph into a GitLab child pipeline or dependency-layered GitHub Actions
   workflow;
-- executing the same exact-reference build contract with Docker Buildx or Podman;
+- executing the same exact-reference build contract with Docker Buildx, Podman, Buildah, or
+  nerdctl/BuildKit;
 - using unique merge-request and commit tags, with graph-wide stable promotion on `main`;
 - making retries safe by verifying image identity before reusing an immutable output tag; and
 - failing early on cycles, missing targets, ambiguous short image names, unsafe paths, and malformed
@@ -127,8 +130,9 @@ Silicon runners. Windows executables are built natively for x86_64 and ARM64; Gi
 classifies its hosted Windows ARM64 runner as public preview.
 
 The executable bundles Python and the Python package dependencies. Commands still expect the tools
-they orchestrate to exist: Git for change inspection, Docker Buildx or Podman for image builds, and
-AWS CLI plus credentials for ECR login and stable-reference resolution.
+they orchestrate to exist: Git for change inspection, a [supported build backend and registry
+transport](docs/container-backends.md), and AWS CLI plus credentials for ECR login and
+stable-reference resolution.
 
 ### Install as a Python tool
 
@@ -181,12 +185,14 @@ uv run platform images graph
 uv run platform images build curl --dry-run
 ```
 
-Remove `--dry-run` when the configured engine is available. Podman remains the backward-compatible
-default; select Docker per command with `--engine docker`, or set it once in configuration.
+Remove `--dry-run` when the configured backend is available. Podman remains the
+backward-compatible default; select another backend with `--builder`, or use `--engine` when its
+matching registry transport should be selected too.
 
 ## The checked-in example
 
-The repository contains two deliberately small images:
+The repository contains two deliberately small images beneath its configured default discovery
+root:
 
 ```text
 images/
@@ -242,6 +248,10 @@ platform images generate-workflow github --output .github/workflows/container-im
 
 ## Worked examples
 
+Paths beginning with `images/` in the worked examples are outputs from this repository's checked-in
+configuration, not a required layout. Set `discovery.root` to your own repository-relative location;
+the inventory, change mapping, plans, and rendered pipelines will use that path instead.
+
 ### Worked example 1: inspect what the repository owns
 
 Use this during adoption, review, or incident diagnosis to confirm that discovery agrees with the
@@ -291,8 +301,18 @@ docker buildx build --load --file images/base/Dockerfile --tag localhost/platfor
 docker buildx build --load --build-context base=docker-image://localhost/platform-images/base:dev --file images/curl/Dockerfile --tag localhost/platform-images/curl:dev images/curl
 ```
 
-Both engines consume the same discovered graph and exact references; the engine changes execution,
-not selection.
+Buildah uses the same containers-storage named-context form as Podman. For a nerdctl local chain,
+the controller exports each newly built parent as an exact OCI layout before binding it into the
+consumer; this avoids treating `localhost/...` as a registry:
+
+```bash
+platform images build curl --builder buildah --dry-run
+platform images build curl --builder nerdctl --dry-run
+```
+
+All four backends consume the same discovered graph and exact references; the backend changes
+execution, not selection. The [compatibility matrix](docs/container-backends.md) explains daemon,
+storage, and version requirements.
 
 When the stable local parent is already present and only the leaf needs rebuilding, opt out of the
 upstream closure explicitly:
@@ -521,8 +541,8 @@ selected.
 
 ### Worked example 9: a shared build input changes
 
-Some files affect every image even though they do not live beneath `images/`. Add those paths to
-`changes.global_inputs`:
+Some files affect every image even though they do not live beneath the configured discovery root.
+Add those paths to `changes.global_inputs`:
 
 ```toml
 [changes]
@@ -672,13 +692,17 @@ Configuration lives in `platform-images.toml`. This repository's complete config
 namespace = "platform-images"
 registry_environment_variable = "PLATFORM_IMAGES_REGISTRY"
 stable_tag = "main"
+transport = "podman"
 
 [tags]
 ci_prefix = "ci"
 commit_prefix = "sha"
 
 [build]
-engine = "podman"
+backend = "podman"
+
+[discovery]
+root = "images"
 
 [dockerfile]
 allowed_short_external_images = ["alpine", "busybox"]
@@ -702,6 +726,7 @@ global_inputs = [
 | `registry.namespace` | The repository prefix between the registry host and target name. Local images use the same namespace beneath `localhost/`. | Change it to match the team's ECR repository hierarchy, such as `platform/base-images`. It also identifies registry-qualified references intended to be internal, allowing missing internal targets to fail validation. |
 | `registry.registry_environment_variable` | The environment-variable name from which the registry hostname is read. | Keep the default when one standard variable is acceptable. Change it to align with an established CI variable such as `COMPANY_ECR_REGISTRY` without hard-coding an account or region in the repository. |
 | `registry.stable_tag` | The mutable alias resolved for unchanged parents and updated after a successful default-branch graph. | `main` is a clear default. Change it to `stable`, `production`, or another existing convention. This is a build baseline, not an environment deployment mechanism. |
+| `registry.transport` | The CLI used for login, retry inspection, push, and promotion. Accepted values are `docker`, `podman`, `buildah`, and `nerdctl`. | Usually match the builder. Podman and Buildah may be mixed because they share containers-storage; Docker and nerdctl require their matching transport. |
 
 For ECR, the registry value is the host only:
 
@@ -721,27 +746,58 @@ The account and region are parsed from that hostname and passed explicitly to AW
 The stable tag is deliberately separate from immutable output tags. Builds publish unique outputs;
 promotion moves only the stable alias after success.
 
-### Build engine settings
+### Discovery settings
 
 | Setting | What it controls | When and why to change it |
 | --- | --- | --- |
-| `build.engine` | Default executor for local builds, CI builds, ECR login, and promotion. Accepted values are `podman` and `docker`. | Keep `podman` for daemonless/rootless runners and existing GitLab fleets. Choose `docker` where Docker Buildx is already the standard, including most GitHub-hosted runner setups. Override an individual execution command with `--engine docker` or `--engine podman`. |
+| `discovery.root` | Repository-relative directory whose direct children are logical image targets. Defaults to `images`. | Set it to an existing monorepo convention such as `containers`, `deploy/images`, or `platform/container-images`. This is not the repository root and cannot be absolute or escape through `..`. |
 
-Docker uses `docker buildx build`, `docker-image://` named contexts, and Buildx's registry digest
-metadata. Podman uses `podman build`, `container-image://` named contexts, and `podman push
---digestfile`. Planning, tags, dependency order, OCI identity labels, retry collision checks, and
-promotion gates are identical.
+For example, this discovers `api` and `worker` without a registration list:
+
+```toml
+[discovery]
+root = "deploy/container-images"
+```
+
+```text
+deploy/container-images/
+├── api/Containerfile
+└── worker/Dockerfile
+```
+
+Target ownership, Git change mapping, validation paths, contexts, and generated plans all use the
+configured root. The target names remain `api` and `worker`, so local dependency instructions stay
+portable: `FROM api` rather than a repository path.
+
+### Build backend and registry transport settings
+
+| Setting | What it controls | When and why to change it |
+| --- | --- | --- |
+| `build.backend` | CLI that turns a Dockerfile or Containerfile into an image. Accepted values are `docker`, `podman`, `buildah`, and `nerdctl`. | Use Docker Buildx for the simplest GitHub-hosted setup, Podman or Buildah for daemonless containers-storage fleets, and nerdctl for containerd/BuildKit environments. Override it with `--builder`. |
+| `registry.transport` | CLI that authenticates, inspects retry candidates, pushes when required, and promotes stable tags. | Match Docker with Docker and nerdctl with nerdctl. Podman and Buildah are interchangeable when they use the same containers-storage configuration. Override it with `--registry-transport`. |
+
+The older `[build] engine = "..."` setting and `--engine` option remain compatible shorthands that
+select a matching builder and transport. New configuration should use the two explicit axes. An
+incompatible pair fails during configuration loading rather than discovering a local-store mismatch
+halfway through a pipeline.
+
+Docker Buildx and nerdctl/BuildKit push directly in CI; Docker reads BuildKit metadata and nerdctl
+pulls the unique output back for identity and digest verification. Local nerdctl dependency chains
+use temporary OCI layouts, while registry-backed CI contexts remain `docker-image://` references.
+Podman and Buildah build into shared containers-storage and push with `--digestfile`. Planning,
+tags, dependency order, OCI identity labels, retry collision checks, and promotion gates are
+identical. See the complete [support and version matrix](docs/container-backends.md).
 
 ### DAG and edge semantics
 
-If `images/curl/Dockerfile` contains `FROM base`, the stored relationship is “`curl` depends on
+If a target named `curl` contains `FROM base`, the stored relationship is “`curl` depends on
 `base`”. Human tree output places `base` above `curl`, and schedulers receive the corresponding
 execution constraint “build `base` before `curl`”. Multi-parent relationships from `FROM`,
 `COPY`/`ADD --from`, and `RUN --mount=from` remain one DAG rather than being flattened into a tree;
 the text view may repeat a node, while `graph --format json` is the authoritative representation.
 
 A repository containing `a -> b -> a` is invalid. `platform images validate` reports the complete,
-deterministic cycle, and all graph-dependent commands stop before Git, Docker, Podman, AWS, or CI
+deterministic cycle, and all graph-dependent commands stop before Git, container tooling, AWS, or CI
 can schedule work. GitLab then maps direct selected edges to `needs`; GitHub maps the same selected
 DAG to topological build layers.
 
@@ -775,8 +831,8 @@ global_inputs = [
 ```
 
 Use this for files actually read by multiple image builds or for policy that changes the meaning of
-all builds. Do not use it for ordinary per-image inputs inside `images/<name>/`; those are mapped to
-their owning target automatically. Configured patterns are unioned with the mandatory controller
+all builds. Do not use it for ordinary per-image inputs beneath `discovery.root`; those are mapped
+to their owning target automatically. Configured patterns are unioned with the mandatory controller
 inputs listed earlier.
 
 ### Environment and CI inputs
@@ -793,19 +849,20 @@ inputs listed earlier.
 | `SOURCE_DATE_EPOCH` or `CI_COMMIT_TIMESTAMP` | Sets the OCI creation timestamp label. | Use `SOURCE_DATE_EPOCH` for reproducible build metadata; otherwise GitLab's commit timestamp is used when present. |
 
 Never put registry credentials in `platform-images.toml`. `platform images registry-login` obtains a
-regional ECR token from the AWS CLI and passes it to the selected Docker or Podman login command
+regional ECR token from the AWS CLI and passes it to the selected registry transport's login command
 over stdin. Use the organisation's short-lived workload identity for AWS authentication.
 
 ## Recommended adoption flow
 
-1. Put every owned target at `images/<name>/Dockerfile` or `images/<name>/Containerfile`; keep
-   exactly one of those names and keep ordinary context files in the same directory.
+1. Choose `discovery.root` and put each owned target in one of its direct child directories. Keep
+   exactly one `Dockerfile` or `Containerfile` per target and keep ordinary context files alongside
+   it.
 2. Replace internal registry references between these images with logical names such as
    `FROM base`.
 3. Configure the registry namespace, stable tag, approved short external images, and genuine shared
    inputs in `platform-images.toml`.
-4. Choose `build.engine`, then run `platform images validate`, `graph`, and `build <leaf> --dry-run`
-   locally. Review the inferred graph with image owners.
+4. Choose `build.backend` and `registry.transport`, then run `platform images validate`, `graph`,
+   and `build <leaf> --dry-run` locally. Review the inferred graph with image owners.
 5. Create the ECR repositories and runner permissions described in [ECR setup](docs/ecr-setup.md).
 6. Either add the parent/child setup in [GitLab CI](docs/gitlab-ci.md), or generate and commit
    `.github/workflows/container-images.yml` using [GitHub Actions](docs/github-actions.md). Keep
@@ -824,7 +881,7 @@ over stdin. Use the organisation's short-lived workload identity for AWS authent
 | `platform images show <name>` | Inspect one target's direct dependencies and dependents. |
 | `platform images validate` | Gate commits before planning or building. |
 | `platform images graph [--format json]` | Review or export the complete dependency graph. |
-| `platform images build <name> [--dry-run] [--no-deps] [--engine docker\|podman]` | Build locally with deterministic dependency binding using the configured or selected engine. |
+| `platform images build <name> [--dry-run] [--no-deps] [--builder <name>]` | Build locally with deterministic dependency binding using the configured or selected backend. |
 | `platform images changed --base <sha> --head <sha>` | Show directly changed targets and removed target directories. |
 | `platform images affected --base <sha> --head <sha>` | Show the topologically ordered downstream rebuild set. |
 | `platform images plan --image <name>` | Preview a local plan for one or more explicitly selected targets. Repeat `--image` to select several. |
@@ -832,13 +889,16 @@ over stdin. Use the organisation's short-lived workload identity for AWS authent
 | `platform images plan --ci` | Calculate a CI change plan and exact references from normalized GitLab/GitHub environment inputs. |
 | `platform images plan --ci --all` | Force a complete CI bootstrap or recovery plan. |
 | `platform images render-plan image-plan.json --format gitlab` | Validate and render the persisted plan into child-pipeline YAML. |
-| `platform images generate-workflow github [--engine docker\|podman] [--output <path>]` | Generate a complete dependency-layered GitHub Actions workflow. |
-| `platform images ci-build ... [--engine docker\|podman]` | Execute one CI target with exact input/output references; normally called only by generated jobs. |
+| `platform images generate-workflow github [--builder <name>] [--registry-transport <name>] [--output <path>]` | Generate a complete dependency-layered GitHub Actions workflow. |
+| `platform images ci-build ... [--builder <name>] [--registry-transport <name>]` | Execute one CI target with exact input/output references; normally called only by generated jobs. |
 | `platform images build-plan-target <plan> <name>` | Strictly reload a persisted plan and build its named target; used by GitHub matrix jobs. |
 | `platform images github-matrix <plan> --max-layers <n>` | Turn a persisted plan into dependency-safe GitHub matrix outputs; used by generated workflows. |
-| `platform images registry-login [--engine docker\|podman]` | Authenticate the selected engine to ECR without exposing the token. |
-| `platform images promote ... [--engine docker\|podman]` | Move a successfully built immutable output to a stable alias. |
-| `platform images promote-plan <plan> [--engine docker\|podman]` | Promote a complete default-branch plan only after its generated build graph succeeds. |
+| `platform images registry-login [--registry-transport <name>]` | Authenticate the selected transport to ECR without exposing the token. |
+| `platform images promote ... [--registry-transport <name>]` | Move a successfully built immutable output to a stable alias. |
+| `platform images promote-plan <plan> [--registry-transport <name>]` | Promote a complete default-branch plan only after its generated build graph succeeds. |
+
+`<name>` for builders and transports is one of `docker`, `podman`, `buildah`, or `nerdctl`.
+`--engine <name>` remains the concise compatibility form when both axes should match.
 
 ## CI operating model
 
@@ -849,8 +909,8 @@ Both consume the same authoritative `image-plan.json` and preserve parallelism b
 targets.
 
 Each generated job uses only its direct local dependencies in `needs`. It pushes before completing,
-so jobs do not rely on a shared runner cache. Docker and Podman retries pull the exact output tag
-and inspect identity
+so jobs do not rely on a shared runner cache. Every supported registry transport pulls the exact
+output tag and inspects identity
 labels for target, commit, source, and dependency references. A matching image is reused by digest;
 a mismatched immutable tag fails as a collision.
 
@@ -872,9 +932,10 @@ uv run --locked --extra dev pytest -m integration
 uv build
 ```
 
-The integration suite builds and runs the `base -> curl` topology with both Podman and Docker
-Buildx, skipping only an engine that is unavailable. GitHub CI repeats the locked quality suite and
-builds the wheel and source distribution. Conventional Commit messages drive Python Semantic
+The integration suite builds and verifies the `base -> curl` topology with Docker Buildx, Podman,
+Buildah, and nerdctl/BuildKit, skipping only tooling that is unavailable locally. GitHub CI installs
+or verifies all four and requires every real build to pass. It also repeats the locked quality suite
+and builds the wheel and source distribution. Conventional Commit messages drive Python Semantic
 Release after `main` passes CI.
 
 ## Support and contributing

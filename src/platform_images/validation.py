@@ -47,9 +47,21 @@ def _relative(path: Path, root: Path) -> str:
 
 def validate_repository(config: RepositoryConfig) -> ValidationReport:
     root = config.root
-    targets = discover_targets(root)
+    targets = discover_targets(root, config.discovery.root)
     graph = build_graph(targets, config)
     issues: list[ValidationIssue] = []
+
+    discovery_root = root / config.discovery.root
+    if not discovery_root.is_dir():
+        issues.append(
+            ValidationIssue(
+                "missing-discovery-root",
+                "error",
+                "configured target discovery root does not exist or is not a directory",
+                config.discovery.root,
+                hint="create the directory or correct discovery.root in platform-images.toml",
+            )
+        )
 
     if not NAMESPACE_RE.fullmatch(config.registry.namespace):
         issues.append(
@@ -121,7 +133,7 @@ def validate_repository(config: RepositoryConfig) -> ValidationReport:
                         "duplicate-target-name",
                         "error",
                         f"duplicate logical target name (case-insensitive): {name}",
-                        f"images/{name}",
+                        f"{config.discovery.root}/{name}",
                     )
                 )
 

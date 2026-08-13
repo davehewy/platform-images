@@ -73,6 +73,28 @@ def test_path_mapping_global_inputs_and_removed_target(
     assert github_workflow_changes.changed_targets == {"base", "curl"}
 
 
+def test_path_mapping_uses_the_configured_discovery_root(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory({"api": "FROM alpine\n"})
+    config_path = root / "platform-images.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        + '\n[discovery]\nroot = "deploy/container-images"\n',
+        encoding="utf-8",
+    )
+    config = RepositoryConfig.load(root)
+
+    changes = map_changes(
+        (ChangedPath("M", None, "deploy/container-images/api/Dockerfile"),),
+        {"api": object()},
+        config,
+    )
+
+    assert changes.changed_targets == {"api"}
+    assert changes.reasons == {"api": ("source-changed:deploy/container-images/api/Dockerfile",)}
+
+
 def test_real_git_modify_add_rename_remove_and_spaces(git_repository: Path) -> None:
     root = git_repository
     config = RepositoryConfig.load(root)
@@ -248,7 +270,7 @@ def test_surviving_reference_to_removed_target_fails(
         (ChangedPath("D", "images/base/Dockerfile", None),), graph.targets, config
     )
     with pytest.raises(PlatformImagesError, match="still references removed local image target"):
-        validate_removed_references(graph, changes)
+        validate_removed_references(graph, changes, config.root)
 
 
 def test_deleting_an_unrelated_file_does_not_invent_removed_target(

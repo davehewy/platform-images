@@ -1,22 +1,35 @@
 from __future__ import annotations
 
+import io
 import json
+import tarfile
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 import pytest
 
 from platform_images.build import (
+    _oci_layout_reference,
     build_command,
     execute_ci_build,
+    execute_local_plan,
     parse_input_references,
 )
 from platform_images.config import RepositoryConfig
 from platform_images.discovery import discover_targets
 from platform_images.errors import PlatformImagesError, ProcessError
 from platform_images.graph import build_graph
-from platform_images.models import BuildEngine, BuildPlanTarget
+from platform_images.models import (
+    BuildBackend,
+    BuildPlanTarget,
+    RegistryTransport,
+)
+from platform_images.planner import local_plan
 from platform_images.process import ProcessResult
+
+EXISTING_DIGEST = "sha256:" + "e" * 64
+PODMAN_DIGEST = "sha256:" + "d" * 64
+DOCKER_DIGEST = "sha256:" + "c" * 64
 
 
 class RecordingRunner:
@@ -29,6 +42,7 @@ class RecordingRunner:
         self.commands: list[list[str]] = []
         self.fail_push = fail_push
         self.existing_labels = existing_labels
+        self.pushed_labels: dict[str, str] | None = None
 
     def run(
         self,
@@ -41,40 +55,89 @@ class RecordingRunner:
         del cwd, env, capture_output
         command = list(arguments)
         self.commands.append(command)
-        if len(command) >= 2 and command[0] in {"podman", "docker"} and command[1] == "pull":
-            if self.existing_labels is None:
+        if (
+            len(command) >= 2
+            and command[0] in {"podman", "docker", "nerdctl", "buildah"}
+            and command[1] == "pull"
+        ):
+            if self.existing_labels is None and self.pushed_labels is None:
                 raise ProcessError("image not found")
             return ProcessResult("", "", 0)
         if (
             len(command) >= 3
-            and command[0] in {"podman", "docker"}
+            and command[0] in {"podman", "docker", "nerdctl"}
             and command[1:3] == ["image", "inspect"]
         ):
             return ProcessResult(
                 json.dumps(
                     [
                         {
-                            "Digest": "sha256:existing",
-                            "Labels": dict(self.existing_labels or {}),
+                            "Digest": EXISTING_DIGEST,
+                            "Labels": dict(self.existing_labels or self.pushed_labels or {}),
+                            "RepoDigests": [f"registry/image@{EXISTING_DIGEST}"],
                         }
                     ]
                 ),
                 "",
                 0,
             )
-        if command[:2] == ["podman", "push"]:
+        if command[:3] == ["buildah", "inspect", "--type"]:
+            return ProcessResult(
+                json.dumps(
+                    {
+                        "FromImageDigest": EXISTING_DIGEST,
+                        "Docker": {
+                            "config": {
+                                "Labels": dict(self.existing_labels or self.pushed_labels or {})
+                            }
+                        },
+                    }
+                ),
+                "",
+                0,
+            )
+        if command[:2] in (["podman", "push"], ["buildah", "push"]):
             if self.fail_push:
                 raise ProcessError("push failed")
             digest_path = Path(command[command.index("--digestfile") + 1])
-            digest_path.write_text("sha256:deadbeef\n", encoding="utf-8")
+            digest_path.write_text(PODMAN_DIGEST + "\n", encoding="utf-8")
         if command[:4] == ["docker", "buildx", "build", "--push"]:
             if self.fail_push:
                 raise ProcessError("push failed")
             metadata_path = Path(command[command.index("--metadata-file") + 1])
             metadata_path.write_text(
-                json.dumps({"containerimage.digest": "sha256:cafebabe"}),
+                json.dumps({"containerimage.digest": DOCKER_DIGEST}),
                 encoding="utf-8",
             )
+        if command[:2] == ["nerdctl", "build"] and "--output" in command:
+            if self.fail_push:
+                raise ProcessError("push failed")
+            self.pushed_labels = {
+                value.partition("=")[0]: value.partition("=")[2]
+                for index, value in enumerate(command)
+                if index > 0 and command[index - 1] == "--label"
+            }
+        if command[:2] == ["nerdctl", "save"]:
+            archive_path = Path(command[command.index("--output") + 1])
+            reference = command[-1]
+            index = json.dumps(
+                {
+                    "schemaVersion": 2,
+                    "manifests": [
+                        {
+                            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                            "digest": "sha256:" + "a" * 64,
+                            "annotations": {"org.opencontainers.image.ref.name": reference},
+                        }
+                    ],
+                }
+            ).encode()
+            layout = b'{"imageLayoutVersion":"1.0.0"}'
+            with tarfile.open(archive_path, "w") as archive:
+                for name, contents in (("index.json", index), ("oci-layout", layout)):
+                    info = tarfile.TarInfo(name)
+                    info.size = len(contents)
+                    archive.addfile(info, io.BytesIO(contents))
         return ProcessResult("", "", 0)
 
 
@@ -119,7 +182,7 @@ def test_docker_buildx_uses_docker_image_contexts_and_loads_local_output() -> No
         False,
     )
 
-    assert build_command(target, engine=BuildEngine.DOCKER) == [
+    assert build_command(target, builder=BuildBackend.DOCKER) == [
         "docker",
         "buildx",
         "build",
@@ -152,15 +215,147 @@ def test_docker_ci_build_pushes_with_buildx_and_reads_registry_digest(
             "CI_PROJECT_URL": "https://github.com/example/project",
         },
         runner=runner,  # type: ignore[arg-type]
-        engine=BuildEngine.DOCKER,
+        builder=BuildBackend.DOCKER,
+        registry_transport=RegistryTransport.DOCKER,
     )
 
     assert runner.commands[0][:2] == ["docker", "pull"]
     build = runner.commands[1]
     assert build[:4] == ["docker", "buildx", "build", "--push"]
     assert "--metadata-file" in build
-    assert result["digest"] == "sha256:cafebabe"
-    assert result["immutable_reference"] == ("registry/platform-images/base@sha256:cafebabe")
+    assert result["digest"] == DOCKER_DIGEST
+    assert result["immutable_reference"] == f"registry/platform-images/base@{DOCKER_DIGEST}"
+
+
+@pytest.mark.parametrize(
+    ("builder", "expected"),
+    [
+        (BuildBackend.PODMAN, "container-image://registry/base@sha256:base"),
+        (BuildBackend.BUILDAH, "container-image://registry/base@sha256:base"),
+        (BuildBackend.NERDCTL, "docker-image://registry/base@sha256:base"),
+    ],
+)
+def test_additional_builders_bind_exact_named_contexts(
+    builder: BuildBackend, expected: str
+) -> None:
+    target = BuildPlanTarget(
+        "app",
+        ("selected",),
+        ("base",),
+        ("base",),
+        "images/app/Containerfile",
+        "images/app",
+        "localhost/platform-images/app:dev",
+        {"base": "registry/base@sha256:base"},
+        False,
+    )
+
+    command = build_command(target, builder=builder)
+
+    assert command[0] == builder.value
+    assert f"base={expected}" in command
+
+
+def test_nerdctl_local_plan_hands_parent_to_consumer_as_exact_oci_layout(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory({"base": "FROM alpine\n", "app": "FROM base\n"})
+    config = RepositoryConfig.load(root)
+    graph = build_graph(discover_targets(root), config)
+    plan = local_plan(graph, config, frozenset({"app"}))
+    runner = RecordingRunner()
+
+    commands = execute_local_plan(
+        plan,
+        root=root,
+        runner=runner,  # type: ignore[arg-type]
+        builder=BuildBackend.NERDCTL,
+    )
+
+    assert [command[:2] for command in runner.commands] == [
+        ["nerdctl", "build"],
+        ["nerdctl", "save"],
+        ["nerdctl", "build"],
+    ]
+    consumer_context = next(
+        argument for argument in runner.commands[-1] if argument.startswith("base=oci-layout://")
+    )
+    assert "@sha256:" not in consumer_context
+    assert "nerdctl save" in commands[1]
+
+
+def test_nerdctl_local_context_rejects_an_ambiguous_oci_layout(tmp_path: Path) -> None:
+    manifests = [
+        {
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "digest": "sha256:" + character * 64,
+        }
+        for character in ("a", "b")
+    ]
+    (tmp_path / "index.json").write_text(
+        json.dumps({"schemaVersion": 2, "manifests": manifests}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PlatformImagesError, match="exactly one image manifest"):
+        _oci_layout_reference(tmp_path, "localhost/platform-images/base:dev")
+
+
+def test_nerdctl_ci_build_pushes_through_buildkit_and_verifies_registry_digest(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory({"base": "FROM alpine\n"})
+    graph = build_graph(discover_targets(root), RepositoryConfig.load(root))
+    runner = RecordingRunner()
+
+    result = execute_ci_build(
+        graph,
+        "base",
+        "registry/platform-images/base:ci-1-abc",
+        {},
+        root=root,
+        environment={
+            "CI_COMMIT_SHA": "abc",
+            "CI_PROJECT_URL": "https://github.com/example/project",
+        },
+        runner=runner,  # type: ignore[arg-type]
+        builder=BuildBackend.NERDCTL,
+        registry_transport=RegistryTransport.NERDCTL,
+    )
+
+    build = runner.commands[1]
+    assert build[:2] == ["nerdctl", "build"]
+    assert "type=image,name=registry/platform-images/base:ci-1-abc,push=true" in build
+    assert runner.commands[-2][:2] == ["nerdctl", "pull"]
+    assert runner.commands[-1][:3] == ["nerdctl", "image", "inspect"]
+    assert result["digest"] == EXISTING_DIGEST
+
+
+def test_buildah_ci_build_uses_shared_storage_transport_digest_file(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory({"base": "FROM alpine\n"})
+    graph = build_graph(discover_targets(root), RepositoryConfig.load(root))
+    runner = RecordingRunner()
+
+    result = execute_ci_build(
+        graph,
+        "base",
+        "registry/platform-images/base:ci-1-abc",
+        {},
+        root=root,
+        environment={
+            "CI_COMMIT_SHA": "abc",
+            "CI_PROJECT_URL": "https://gitlab.example/project",
+        },
+        runner=runner,  # type: ignore[arg-type]
+        builder=BuildBackend.BUILDAH,
+        registry_transport=RegistryTransport.BUILDAH,
+    )
+
+    assert runner.commands[1][:2] == ["buildah", "build"]
+    assert runner.commands[2][:3] == ["buildah", "push", "--digestfile"]
+    assert result["digest"] == PODMAN_DIGEST
 
 
 def test_ci_build_validates_inputs_pushes_and_reads_digest(
@@ -202,8 +397,8 @@ def test_ci_build_validates_inputs_pushes_and_reads_digest(
     assert result == {
         "target": "curl",
         "reference": output,
-        "digest": "sha256:deadbeef",
-        "immutable_reference": "registry/platform-images/curl@sha256:deadbeef",
+        "digest": PODMAN_DIGEST,
+        "immutable_reference": f"registry/platform-images/curl@{PODMAN_DIGEST}",
     }
 
 
@@ -275,7 +470,58 @@ def test_ci_build_retry_reuses_exact_existing_immutable_image(
         ["podman", "pull", "registry/platform-images/curl:ci-1-abc"],
         ["podman", "image", "inspect"],
     ]
-    assert result["digest"] == "sha256:existing"
+    assert result["digest"] == EXISTING_DIGEST
+
+
+@pytest.mark.parametrize(
+    ("builder", "transport", "inspect_prefix"),
+    [
+        (
+            BuildBackend.BUILDAH,
+            RegistryTransport.BUILDAH,
+            ["buildah", "inspect", "--type"],
+        ),
+        (
+            BuildBackend.NERDCTL,
+            RegistryTransport.NERDCTL,
+            ["nerdctl", "image", "inspect"],
+        ),
+    ],
+)
+def test_additional_backends_reuse_only_identity_matching_existing_output(
+    repository_factory: Callable[[dict[str, str]], Path],
+    builder: BuildBackend,
+    transport: RegistryTransport,
+    inspect_prefix: list[str],
+) -> None:
+    root = repository_factory({"base": "FROM alpine\n"})
+    graph = build_graph(discover_targets(root), RepositoryConfig.load(root))
+    labels = {
+        "org.opencontainers.image.revision": "abc",
+        "org.opencontainers.image.source": "https://example.com/project",
+        "io.platform-images.target": "base",
+        "io.platform-images.input-references": "{}",
+    }
+    runner = RecordingRunner(existing_labels=labels)
+
+    result = execute_ci_build(
+        graph,
+        "base",
+        "registry/platform-images/base:sha-abc",
+        {},
+        root=root,
+        environment={
+            "CI_COMMIT_SHA": "abc",
+            "CI_PROJECT_URL": "https://example.com/project",
+        },
+        runner=runner,  # type: ignore[arg-type]
+        builder=builder,
+        registry_transport=transport,
+    )
+
+    assert runner.commands[1][: len(inspect_prefix)] == inspect_prefix
+    assert len(runner.commands) == 2
+    assert result["digest"] == EXISTING_DIGEST
 
 
 def test_ci_build_rejects_existing_tag_with_different_graph_inputs(

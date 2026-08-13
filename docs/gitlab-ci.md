@@ -33,8 +33,8 @@ The selected runner must provide:
 
 - Python 3.12 and this installed package
 - Git with full repository history
-- the configured engine: Podman with named `container-image://` contexts, or Docker Buildx with
-  named `docker-image://` contexts
+- a supported builder/transport pair: Docker Buildx, Podman, Buildah, or nerdctl/BuildKit, with the
+  named image contexts and versions in [container backends](container-backends.md)
 - AWS CLI and workload authentication for ECR
 - network access to pull base images and pull/push ECR images
 
@@ -42,5 +42,10 @@ Required variables include `PLATFORM_IMAGES_REGISTRY`. GitLab supplies commit, p
 branch, and merge-request variables. AWS credentials should use the organisation's existing
 short-lived workload identity rather than static repository secrets.
 `platform images registry-login` parses the ECR region from that registry value, retrieves the
-regional token, and passes it to the selected Docker or Podman login command over stdin; it does
+regional token, and passes it to the selected registry transport's login command over stdin; it does
 not depend on an ambient default region or print the credential.
+
+The example template sets `PLATFORM_IMAGES_RUNNER_TAG=podman` and expands it in `.image-build.tags`.
+Override that CI/CD variable to route generated jobs to the fleet that provides the configured
+builder and transport—for example `docker`, `buildah`, or `containerd`. Keep the actual backend
+selection in `platform-images.toml`; the runner tag is scheduling metadata, not an execution switch.

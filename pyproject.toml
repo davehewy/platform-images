@@ -11,7 +11,7 @@ requires-python = ">=3.12,<3.13"
 authors = [{ name = "David Heward", email = "dave@bytewire.co.uk" }]
 license = "MIT"
 license-files = ["LICENSE"]
-keywords = ["containers", "dependency-graph", "devops", "docker", "github-actions", "gitlab-ci", "monorepo", "podman"]
+keywords = ["buildah", "containerd", "containers", "dependency-graph", "devops", "docker", "github-actions", "gitlab-ci", "monorepo", "nerdctl", "podman"]
 dependencies = ["PyYAML>=6.0.2"]
 
 [project.optional-dependencies]
@@ -40,7 +40,7 @@ packages = ["src/platform_images"]
 [tool.pytest.ini_options]
 addopts = "-ra"
 testpaths = ["tests"]
-markers = ["integration: requires a working Docker or Podman service and network access"]
+markers = ["integration: requires a working supported container backend and network access"]
 
 [tool.ruff]
 target-version = "py312"

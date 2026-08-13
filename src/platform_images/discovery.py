@@ -8,14 +8,14 @@ from platform_images.models import ImageTarget
 TARGET_NAME_RE = re.compile(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*$")
 
 
-def discover_targets(root: Path) -> dict[str, ImageTarget]:
-    """Discover every direct child of images/ without a central registration list."""
-    images_dir = root / "images"
-    if not images_dir.is_dir():
+def discover_targets(root: Path, discovery_root: str | Path = "images") -> dict[str, ImageTarget]:
+    """Discover every direct child of the configured target root."""
+    target_root = root / discovery_root
+    if not target_root.is_dir():
         return {}
     targets: dict[str, ImageTarget] = {}
     for directory in sorted(
-        (entry for entry in images_dir.iterdir() if entry.is_dir()), key=lambda path: path.name
+        (entry for entry in target_root.iterdir() if entry.is_dir()), key=lambda path: path.name
     ):
         dockerfile = directory / "Dockerfile"
         containerfile = directory / "Containerfile"

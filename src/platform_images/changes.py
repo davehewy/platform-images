@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import fnmatch
 from collections.abc import Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from platform_images.config import RepositoryConfig
 from platform_images.errors import GitError, PlatformImagesError, ProcessError
@@ -90,10 +90,11 @@ def _matches(path: str, patterns: Sequence[str]) -> bool:
     return False
 
 
-def _target_for_path(path: str) -> str | None:
-    parts = Path(path).parts
-    if len(parts) >= 3 and parts[0] == "images":
-        return parts[1]
+def _target_for_path(path: str, discovery_root: str) -> str | None:
+    parts = PurePosixPath(path).parts
+    root_parts = PurePosixPath(discovery_root).parts
+    if len(parts) >= len(root_parts) + 2 and parts[: len(root_parts)] == root_parts:
+        return parts[len(root_parts)]
     return None
 
 
@@ -112,7 +113,7 @@ def map_changes(
         for path in change.paths:
             if _matches(path, global_inputs):
                 global_paths.add(path)
-            target_name = _target_for_path(path)
+            target_name = _target_for_path(path, config.discovery.root)
             if target_name is None:
                 continue
             if target_name in target_names:
@@ -146,7 +147,7 @@ def detect_changes(
     return map_changes(client.changed_paths(base, head), targets, config)
 
 
-def validate_removed_references(graph: ImageGraph, changes: ChangeSet) -> None:
+def validate_removed_references(graph: ImageGraph, changes: ChangeSet, root: Path) -> None:
     """Reject surviving bare references to targets deleted by this comparison."""
     for consumer in sorted(graph.targets):
         for reference in graph.parse_results[consumer].references:
@@ -160,7 +161,10 @@ def validate_removed_references(graph: ImageGraph, changes: ChangeSet) -> None:
                 repository = repository.split(":", 1)[0]
             if repository in changes.removed_targets:
                 target = graph.targets[consumer]
-                path = target.dockerfile.relative_to(target.directory.parents[1]).as_posix()
+                try:
+                    path = target.dockerfile.relative_to(root).as_posix()
+                except ValueError:
+                    path = str(target.dockerfile)
                 raise PlatformImagesError(
                     f"{path}:{reference.line_number} still references removed local image target "
                     f'"{repository}"'

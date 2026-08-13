@@ -43,6 +43,54 @@ def test_graph_uses_ascii_tree_on_windows(
     assert capsys.readouterr().out == "base\n\\-- curl\n"
 
 
+def test_build_supports_nerdctl_and_buildah_dry_runs(
+    repository_factory: Callable[[dict[str, str]], Path], capsys
+) -> None:
+    root = repository_factory({"base": "FROM alpine\n", "curl": "FROM base\n"})
+
+    assert (
+        main(
+            ["images", "build", "curl", "--builder", "nerdctl", "--dry-run"],
+            cwd=root,
+            environment={},
+        )
+        == 0
+    )
+    nerdctl_plan = capsys.readouterr().out
+    assert "nerdctl save" in nerdctl_plan
+    assert "base=oci-layout://<verified-temporary-layout-for-base>" in nerdctl_plan
+
+    assert (
+        main(
+            ["images", "build", "curl", "--builder", "buildah", "--dry-run"],
+            cwd=root,
+            environment={},
+        )
+        == 0
+    )
+    assert "base=container-image://localhost/platform-images/base:dev" in capsys.readouterr().out
+
+
+def test_commands_discover_a_configured_nested_target_root(
+    repository_factory: Callable[[dict[str, str]], Path], capsys
+) -> None:
+    root = repository_factory({})
+    target = root / "deploy" / "container-images" / "api"
+    target.mkdir(parents=True)
+    (target / "Containerfile").write_text("FROM alpine\n", encoding="utf-8")
+    config_path = root / "platform-images.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        + '\n[discovery]\nroot = "deploy/container-images"\n',
+        encoding="utf-8",
+    )
+
+    assert main(["images", "list"], cwd=root, environment={}) == 0
+    assert capsys.readouterr().out == "api\n"
+    assert main(["images", "build", "api", "--dry-run"], cwd=root, environment={}) == 0
+    assert "deploy/container-images/api/Containerfile" in capsys.readouterr().out
+
+
 def test_validation_exit_code_and_json_error_code(
     repository_factory: Callable[[dict[str, str]], Path], capsys
 ) -> None:
@@ -270,7 +318,7 @@ def test_generate_github_workflow_writes_inside_repository(
     workflow = (root / ".github" / "workflows" / "images.yml").read_text(encoding="utf-8")
     assert "image_layer_0:" in workflow
     assert "image_layer_1:" in workflow
-    assert "--engine docker" in workflow
+    assert "--builder docker --registry-transport docker" in workflow
 
 
 def test_generate_workflow_refuses_output_outside_repository(

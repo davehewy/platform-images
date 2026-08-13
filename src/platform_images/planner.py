@@ -85,7 +85,7 @@ def change_plan(
 ) -> BuildPlan:
     if mode is BuildMode.LOCAL:
         raise ValueError("change plans require a CI build mode")
-    validate_removed_references(graph, changes)
+    validate_removed_references(graph, changes, config.root)
     reasons = affected_reasons(graph, changes)
     build_targets = frozenset(reasons)
     order = graph.topological_order(build_targets)
