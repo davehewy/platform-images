@@ -90,6 +90,12 @@ jobs:
           curl -fsSLO "https://github.com/containerd/nerdctl/releases/download/v${NERDCTL_VERSION}/${archive}"
           printf '%s  %s\n' "$NERDCTL_FULL_LINUX_AMD64_SHA256" "$archive" | sha256sum --check
           sudo tar -xzf "${archive}" -C /usr/local
+          sudo mv /usr/local/bin/nerdctl /usr/local/bin/nerdctl.real
+          printf '%s\n' \
+            '#!/bin/sh' \
+            'exec sudo --preserve-env=CONTAINERD_ADDRESS,BUILDKIT_HOST /usr/local/bin/nerdctl.real "$@"' |
+            sudo tee /usr/local/bin/nerdctl >/dev/null
+          sudo chmod 0755 /usr/local/bin/nerdctl
           sudo install -d \
             /run/platform-images-buildkit \
             /run/platform-images-containerd \

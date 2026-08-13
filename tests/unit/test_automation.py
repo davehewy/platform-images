@@ -64,6 +64,7 @@ def test_github_actions_are_immutable_and_ci_gates_release() -> None:
     assert "podman info" in integration_script
     assert "buildah info" in integration_script
     assert "nerdctl-full-" in integration_script
+    assert "--preserve-env=CONTAINERD_ADDRESS,BUILDKIT_HOST" in integration_script
     assert (
         len(
             next(
