@@ -1,0 +1,21 @@
+[registry]
+namespace = "platform-images"
+registry_environment_variable = "PLATFORM_IMAGES_REGISTRY"
+stable_tag = "main"
+
+[tags]
+ci_prefix = "ci"
+commit_prefix = "sha"
+
+[dockerfile]
+allowed_short_external_images = ["alpine", "busybox"]
+
+[changes]
+global_inputs = [
+  "src/platform_images/**",
+  "pyproject.toml",
+  "uv.lock",
+  "platform-images.toml",
+  ".gitlab-ci.yml",
+  ".gitlab/**",
+]

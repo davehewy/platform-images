@@ -1,0 +1,35 @@
+stages:
+  - quality
+  - plan
+  - images
+
+quality:
+  stage: quality
+  script:
+    - ruff check .
+    - ruff format --check .
+    - pytest
+
+generate-image-pipeline:
+  stage: plan
+  variables:
+    GIT_DEPTH: "0"
+  script:
+    - platform images validate
+    - platform images plan --ci --format json > image-plan.json
+    - platform images render-plan image-plan.json --format gitlab > generated-images.yml
+  artifacts:
+    paths:
+      - image-plan.json
+      - generated-images.yml
+
+run-image-pipeline:
+  stage: images
+  needs:
+    - generate-image-pipeline
+  trigger:
+    include:
+      - local: .gitlab/image-build-jobs.yml
+      - artifact: generated-images.yml
+        job: generate-image-pipeline
+    strategy: mirror

@@ -1,0 +1,8 @@
+.image-build:
+  stage: build
+  interruptible: true
+  tags:
+    - podman
+  before_script:
+    - platform images validate
+    - platform images registry-login
