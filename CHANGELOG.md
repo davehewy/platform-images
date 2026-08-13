@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.3.0 (2026-08-13)
+
+### Features
+
+- Add Windows releases and community support
+  ([`71ad8ef`](https://github.com/davehewy/platform-images/commit/71ad8efeab47f499d8517ce61f60a54d23163f13))
+
+
 ## v0.2.0 (2026-08-13)
 
 ### Documentation

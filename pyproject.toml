@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "platform-images"
-version = "0.2.0"
+version = "0.3.0"
 description = "Dependency-aware orchestration for container-image monorepos and dynamic GitLab pipelines"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
