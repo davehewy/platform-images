@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.3.2 (2026-08-13)
+
+### Bug Fixes
+
+- Keep native Python for release builds
+  ([`7fa1a2b`](https://github.com/davehewy/platform-images/commit/7fa1a2b21cdceeb07951bd3cfa00549c74807011))
+
+
 ## v0.3.1 (2026-08-13)
 
 ### Bug Fixes
