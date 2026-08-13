@@ -19,7 +19,7 @@ Repository creation templates affect repositories created after the template is 
 not retroactively align existing repositories. Inventory existing `platform-images/*` repositories
 and perform a one-time policy, encryption, tag-mutability, lifecycle, and resource-tag migration.
 
-The GitLab role needs ECR authentication plus pull and push operations: token retrieval, layer
+The GitLab or GitHub Actions role needs ECR authentication plus pull and push operations: token retrieval, layer
 availability checks, upload initiation/parts/completion, image put, batch image lookup, and image
 download URLs. Limit repository resources to `platform-images/*` wherever the API supports it.
 The planning role also needs `ecr:DescribeImages` so `main` can be resolved to an immutable digest.

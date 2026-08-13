@@ -18,6 +18,16 @@ def test_discovers_directories_without_registration(
     assert targets["alpha"].dockerfile == root / "images" / "alpha" / "Dockerfile"
 
 
+def test_discovers_containerfile_when_dockerfile_is_absent(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory({"base": "<missing>"})
+    containerfile = root / "images" / "base" / "Containerfile"
+    containerfile.write_text("FROM scratch\n", encoding="utf-8")
+
+    assert discover_targets(root)["base"].dockerfile == containerfile
+
+
 def test_target_name_rules() -> None:
     assert valid_target_name("new-tool")
     assert valid_target_name("python_3.12")

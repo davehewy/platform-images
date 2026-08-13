@@ -16,6 +16,7 @@ ZERO_SHA = "0" * 40
 # deliberately not configurable: a commit must not be able to disable rebuild detection for the
 # same commit by editing platform-images.toml.
 MANDATORY_GLOBAL_INPUTS = (
+    ".github/workflows/**",
     ".gitlab-ci.yml",
     ".gitlab/**",
     "platform-images.toml",
@@ -116,7 +117,9 @@ def map_changes(
                 continue
             if target_name in target_names:
                 reasons.setdefault(target_name, set()).add(f"source-changed:{path}")
-            elif change.status.startswith(("D", "R")) and path.endswith("/Dockerfile"):
+            elif change.status.startswith(("D", "R")) and path.endswith(
+                ("/Dockerfile", "/Containerfile")
+            ):
                 removed.add(target_name)
     if global_paths:
         for target_name in target_names:

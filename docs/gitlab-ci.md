@@ -16,7 +16,7 @@ dependency set, `needs` edge, input binding, or discovered path.
 
 Generated image jobs extend `.image-build`, use only their direct local dependencies in `needs`,
 and call `platform images ci-build` with an exact output and exact input references. Each job pushes
-before completion, so no local Podman store is assumed to cross runner jobs. An empty plan gets a
+before completion, so no local container-engine store is assumed to cross runner jobs. An empty plan gets a
 `no_image_changes` job because GitLab rejects a downstream pipeline with no executable jobs.
 
 Merge-request tags are unique `ci-<pipeline>-<commit>` values and are never promoted. Default-branch
@@ -29,11 +29,12 @@ identity labels match, the job returns the existing digest without rebuilding or
 whose identity differs is an explicit collision failure; immutable ECR tags never need to be made
 mutable for retry support.
 
-The selected `podman` runner must provide:
+The selected runner must provide:
 
 - Python 3.12 and this installed package
 - Git with full repository history
-- Podman capable of named `container-image://` build contexts
+- the configured engine: Podman with named `container-image://` contexts, or Docker Buildx with
+  named `docker-image://` contexts
 - AWS CLI and workload authentication for ECR
 - network access to pull base images and pull/push ECR images
 
@@ -41,5 +42,5 @@ Required variables include `PLATFORM_IMAGES_REGISTRY`. GitLab supplies commit, p
 branch, and merge-request variables. AWS credentials should use the organisation's existing
 short-lived workload identity rather than static repository secrets.
 `platform images registry-login` parses the ECR region from that registry value, retrieves the
-regional token, and passes it to Podman over stdin; it does not depend on an ambient default region
-or print the credential.
+regional token, and passes it to the selected Docker or Podman login command over stdin; it does
+not depend on an ambient default region or print the credential.

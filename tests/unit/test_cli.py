@@ -159,6 +159,20 @@ def test_ci_base_and_head_resolution() -> None:
     ) == (None, "head", BuildMode.DEFAULT_BRANCH)
     assert git_client.calls == []
 
+    # GitHub exposes the base branch tip, not GitLab's merge-request diff-base semantic. The
+    # generated workflow therefore leaves the GitLab-specific variable empty and calculates the
+    # actual merge base from full history.
+    assert _ci_base_head(
+        {
+            "CI_COMMIT_SHA": "github-head",
+            "CI_MERGE_REQUEST_IID": "7",
+            "CI_COMMIT_BEFORE_SHA": "",
+            "CI_DEFAULT_BRANCH": "main",
+        },
+        git_client,  # type: ignore[arg-type]
+    ) == ("merge-base", "github-head", BuildMode.MERGE_REQUEST)
+    assert git_client.calls == [("github-head", "origin/main")]
+
 
 def test_first_default_branch_pipeline_bootstraps_every_target(
     repository_factory: Callable[[dict[str, str]], Path], capsys
@@ -233,3 +247,50 @@ def test_argparse_invalid_invocation_exits_two() -> None:
     with pytest.raises(SystemExit) as error:
         main(["images", "changed", "--base", "one"])
     assert error.value.code == 2
+
+
+def test_generate_github_workflow_writes_inside_repository(
+    repository_factory: Callable[[dict[str, str]], Path], capsys
+) -> None:
+    root = repository_factory({"base": "FROM alpine\n", "curl": "FROM base\n"})
+    result = main(
+        [
+            "images",
+            "generate-workflow",
+            "github",
+            "--output",
+            ".github/workflows/images.yml",
+        ],
+        cwd=root,
+        environment={},
+    )
+
+    assert result == 0
+    assert capsys.readouterr().out == ".github/workflows/images.yml\n"
+    workflow = (root / ".github" / "workflows" / "images.yml").read_text(encoding="utf-8")
+    assert "image_layer_0:" in workflow
+    assert "image_layer_1:" in workflow
+    assert "--engine docker" in workflow
+
+
+def test_generate_workflow_refuses_output_outside_repository(
+    repository_factory: Callable[[dict[str, str]], Path], tmp_path: Path, capsys
+) -> None:
+    root = repository_factory({"base": "FROM alpine\n"})
+    destination = tmp_path / "outside.yml"
+
+    assert (
+        main(
+            [
+                "images",
+                "generate-workflow",
+                "github",
+                "--output",
+                str(destination),
+            ],
+            cwd=root,
+            environment={},
+        )
+        == 1
+    )
+    assert "must stay within" in capsys.readouterr().err

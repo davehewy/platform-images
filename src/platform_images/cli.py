@@ -22,7 +22,7 @@ from platform_images.changes import (
 from platform_images.config import RepositoryConfig
 from platform_images.discovery import discover_targets
 from platform_images.errors import PlatformImagesError
-from platform_images.models import BuildMode, BuildPlan, ChangeSet
+from platform_images.models import BuildEngine, BuildMode, BuildPlan, ChangeSet
 from platform_images.planner import (
     affected_reasons,
     all_ci_plan,
@@ -30,12 +30,14 @@ from platform_images.planner import (
     local_plan,
     validate_plan_against_graph,
 )
+from platform_images.references import ReferencePolicy
 from platform_images.registry import (
+    ContainerRegistryClient,
     ECRRegistryClient,
-    PodmanRegistryClient,
     login_to_ecr,
     registry_from_environment_json,
 )
+from platform_images.renderers.github import render_github_outputs, render_github_workflow
 from platform_images.renderers.gitlab import render_gitlab
 from platform_images.renderers.graph_json import graph_data, render_graph_json
 from platform_images.renderers.graph_text import render_graph_text
@@ -72,6 +74,7 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("name")
     build.add_argument("--dry-run", action="store_true")
     build.add_argument("--no-deps", action="store_true")
+    build.add_argument("--engine", choices=tuple(engine.value for engine in BuildEngine))
 
     for name in ("changed", "affected"):
         command = commands.add_parser(name)
@@ -95,12 +98,44 @@ def _parser() -> argparse.ArgumentParser:
     ci_build.add_argument("name")
     ci_build.add_argument("--output-ref", required=True)
     ci_build.add_argument("--input-ref", action="append", default=[])
+    ci_build.add_argument("--engine", choices=tuple(engine.value for engine in BuildEngine))
 
-    commands.add_parser("registry-login")
+    registry_login = commands.add_parser("registry-login")
+    registry_login.add_argument("--engine", choices=tuple(engine.value for engine in BuildEngine))
 
     promote_parser = commands.add_parser("promote")
     promote_parser.add_argument("--source", required=True)
     promote_parser.add_argument("--destination", required=True)
+    promote_parser.add_argument("--engine", choices=tuple(engine.value for engine in BuildEngine))
+
+    build_plan_target = commands.add_parser("build-plan-target")
+    build_plan_target.add_argument("plan_file", type=Path)
+    build_plan_target.add_argument("name")
+    build_plan_target.add_argument(
+        "--engine", choices=tuple(engine.value for engine in BuildEngine)
+    )
+
+    promote_plan = commands.add_parser("promote-plan")
+    promote_plan.add_argument("plan_file", type=Path)
+    promote_plan.add_argument("--engine", choices=tuple(engine.value for engine in BuildEngine))
+
+    github_matrix = commands.add_parser("github-matrix")
+    github_matrix.add_argument("plan_file", type=Path)
+    github_matrix.add_argument("--max-layers", type=int, required=True)
+
+    workflow = commands.add_parser("generate-workflow")
+    workflow.add_argument("provider", choices=("github",))
+    workflow.add_argument("--default-branch", default="main")
+    workflow.add_argument("--runner", default="ubuntu-latest")
+    workflow.add_argument(
+        "--engine",
+        choices=tuple(engine.value for engine in BuildEngine),
+        default=BuildEngine.DOCKER.value,
+    )
+    workflow.add_argument("--aws-auth", choices=("oidc", "ambient"), default="oidc")
+    workflow.add_argument("--aws-role-variable", default="AWS_ROLE_TO_ASSUME")
+    workflow.add_argument("--aws-region-variable", default="AWS_REGION")
+    workflow.add_argument("--output", type=Path)
     return parser
 
 
@@ -221,6 +256,20 @@ def _registry_client(config: RepositoryConfig, registry: str, env: Mapping[str, 
     return static or ECRRegistryClient(config, registry)
 
 
+def _engine(arguments: argparse.Namespace, config: RepositoryConfig) -> BuildEngine:
+    selected = getattr(arguments, "engine", None)
+    return BuildEngine(selected) if selected else config.build.engine
+
+
+def _load_plan(path: Path, graph, config: RepositoryConfig) -> BuildPlan:
+    try:
+        plan = load_plan_json(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise PlatformImagesError(f"unable to read persisted plan {path}: {exc}") from exc
+    validate_plan_against_graph(plan, graph, config)
+    return plan
+
+
 def _create_plan(
     arguments: argparse.Namespace,
     config: RepositoryConfig,
@@ -327,7 +376,7 @@ def _run(arguments: argparse.Namespace, cwd: Path | None, environment: Mapping[s
             print(json.dumps({"schema_version": 1, "name": arguments.name, **data}, indent=2))
         else:
             print(arguments.name)
-            print(f"  dockerfile: {data['dockerfile']}")
+            print(f"  build_file: {data['dockerfile']}")
             print(f"  dependencies: {', '.join(data['dependencies']) or 'none'}")
             print(f"  dependents: {', '.join(data['dependents']) or 'none'}")
         return 0
@@ -347,7 +396,12 @@ def _run(arguments: argparse.Namespace, cwd: Path | None, environment: Mapping[s
             frozenset({arguments.name}),
             include_dependencies=not arguments.no_deps,
         )
-        commands = execute_local_plan(plan, root=root, dry_run=arguments.dry_run)
+        commands = execute_local_plan(
+            plan,
+            root=root,
+            dry_run=arguments.dry_run,
+            engine=_engine(arguments, config),
+        )
         if arguments.dry_run:
             print("\n".join(commands))
         return 0
@@ -394,13 +448,7 @@ def _run(arguments: argparse.Namespace, cwd: Path | None, environment: Mapping[s
             print(render_plan_text(plan))
         return 0
     if arguments.command == "render-plan":
-        try:
-            plan = load_plan_json(arguments.plan_file.read_text(encoding="utf-8"))
-        except OSError as exc:
-            raise PlatformImagesError(
-                f"unable to read persisted plan {arguments.plan_file}: {exc}"
-            ) from exc
-        validate_plan_against_graph(plan, graph, config)
+        plan = _load_plan(arguments.plan_file, graph, config)
         if arguments.format == "json":
             print(render_plan_json(plan))
         elif arguments.format == "text":
@@ -421,6 +469,7 @@ def _run(arguments: argparse.Namespace, cwd: Path | None, environment: Mapping[s
             parse_input_references(arguments.input_ref),
             root=root,
             environment=environment,
+            engine=_engine(arguments, config),
         )
         print(result_json(result))
         return 0
@@ -430,17 +479,90 @@ def _run(arguments: argparse.Namespace, cwd: Path | None, environment: Mapping[s
             raise PlatformImagesError(
                 f"{config.registry.registry_environment_variable} is required for registry login"
             )
-        login_to_ecr(registry, cwd=root)
-        print(json.dumps({"registry": registry.rstrip("/"), "authenticated": True}))
+        engine = _engine(arguments, config)
+        login_to_ecr(registry, cwd=root, engine=engine)
+        print(
+            json.dumps(
+                {"registry": registry.rstrip("/"), "authenticated": True, "engine": engine.value}
+            )
+        )
         return 0
     if arguments.command == "promote":
-        PodmanRegistryClient(root).promote(arguments.source, arguments.destination)
+        ContainerRegistryClient(root, engine=_engine(arguments, config)).promote(
+            arguments.source, arguments.destination
+        )
         print(
             json.dumps(
                 {"source": arguments.source, "destination": arguments.destination},
                 sort_keys=True,
             )
         )
+        return 0
+    if arguments.command == "build-plan-target":
+        plan = _load_plan(arguments.plan_file, graph, config)
+        if plan.mode is BuildMode.LOCAL:
+            raise PlatformImagesError("build-plan-target requires a CI plan")
+        target = next((target for target in plan.targets if target.name == arguments.name), None)
+        if target is None:
+            raise PlatformImagesError(f"target is not present in persisted plan: {arguments.name}")
+        result = execute_ci_build(
+            graph,
+            target.name,
+            target.output_ref,
+            target.input_refs,
+            root=root,
+            environment=environment,
+            engine=_engine(arguments, config),
+        )
+        print(result_json(result))
+        return 0
+    if arguments.command == "promote-plan":
+        plan = _load_plan(arguments.plan_file, graph, config)
+        if plan.mode is not BuildMode.DEFAULT_BRANCH:
+            raise PlatformImagesError("promote-plan requires a default-branch CI plan")
+        registry = environment.get(config.registry.registry_environment_variable)
+        if not registry:
+            raise PlatformImagesError(
+                f"{config.registry.registry_environment_variable} is required for promotion"
+            )
+        transport = ContainerRegistryClient(root, engine=_engine(arguments, config))
+        policy = ReferencePolicy(config, registry)
+        for target in plan.targets:
+            transport.promote(target.output_ref, policy.stable(target.name))
+        print(json.dumps({"promoted": [target.name for target in plan.targets]}))
+        return 0
+    if arguments.command == "github-matrix":
+        plan = _load_plan(arguments.plan_file, graph, config)
+        if plan.mode is BuildMode.LOCAL:
+            raise PlatformImagesError("github-matrix requires a CI plan")
+        print(render_github_outputs(plan, arguments.max_layers))
+        return 0
+    if arguments.command == "generate-workflow":
+        rendered = render_github_workflow(
+            graph,
+            config,
+            default_branch=arguments.default_branch,
+            runner=arguments.runner,
+            engine=BuildEngine(arguments.engine),
+            aws_auth=arguments.aws_auth,
+            aws_role_variable=arguments.aws_role_variable,
+            aws_region_variable=arguments.aws_region_variable,
+        )
+        if arguments.output is None:
+            print(rendered, end="")
+        else:
+            output = arguments.output
+            if not output.is_absolute():
+                output = root / output
+            try:
+                output.resolve().relative_to(root)
+            except ValueError as exc:
+                raise PlatformImagesError(
+                    "workflow output must stay within the repository"
+                ) from exc
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(rendered, encoding="utf-8")
+            print(output.relative_to(root).as_posix())
         return 0
     raise AssertionError(f"unhandled command: {arguments.command}")
 

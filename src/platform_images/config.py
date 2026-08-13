@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from platform_images.errors import ConfigurationError
+from platform_images.models import BuildEngine
 
 NAMESPACE_RE = re.compile(r"^[a-z0-9]+(?:[._/-][a-z0-9]+)*$")
 
@@ -34,12 +35,18 @@ class DockerfileConfig:
 
 
 @dataclass(frozen=True)
+class BuildConfig:
+    engine: BuildEngine
+
+
+@dataclass(frozen=True)
 class RepositoryConfig:
     root: Path
     registry: RegistryConfig
     tags: TagConfig
     changes: ChangeConfig
     dockerfile: DockerfileConfig
+    build: BuildConfig
 
     @classmethod
     def load(cls, root: Path) -> RepositoryConfig:
@@ -59,6 +66,7 @@ class RepositoryConfig:
             tag_data = data["tags"]
             change_data = data["changes"]
             dockerfile_data = data.get("dockerfile", {})
+            build_data = data.get("build", {})
             registry = RegistryConfig(
                 namespace=str(registry_data["namespace"]),
                 registry_environment_variable=str(registry_data["registry_environment_variable"]),
@@ -70,6 +78,7 @@ class RepositoryConfig:
             )
             raw_global_inputs = change_data["global_inputs"]
             raw_external_images = dockerfile_data.get("allowed_short_external_images", ())
+            engine = BuildEngine(str(build_data.get("engine", BuildEngine.PODMAN.value)))
             if not isinstance(raw_global_inputs, list) or not all(
                 isinstance(item, str) for item in raw_global_inputs
             ):
@@ -82,7 +91,14 @@ class RepositoryConfig:
                 )
             global_inputs = tuple(sorted(raw_global_inputs))
             allowed_short_external_images = frozenset(raw_external_images) | {"scratch"}
-        except (KeyError, OSError, TypeError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        except (
+            KeyError,
+            OSError,
+            TypeError,
+            UnicodeDecodeError,
+            ValueError,
+            tomllib.TOMLDecodeError,
+        ) as exc:
             raise ConfigurationError(f"invalid configuration in {path}: {exc}") from exc
         if not registry.registry_environment_variable.isidentifier():
             raise ConfigurationError(
@@ -104,4 +120,5 @@ class RepositoryConfig:
             tags=tags,
             changes=ChangeConfig(global_inputs),
             dockerfile=DockerfileConfig(allowed_short_external_images),
+            build=BuildConfig(engine),
         )

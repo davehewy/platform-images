@@ -19,6 +19,11 @@ class BuildMode(StrEnum):
     DEFAULT_BRANCH = "default_branch"
 
 
+class BuildEngine(StrEnum):
+    PODMAN = "podman"
+    DOCKER = "docker"
+
+
 @dataclass(frozen=True)
 class ImageTarget:
     name: str

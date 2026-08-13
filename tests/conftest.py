@@ -16,6 +16,9 @@ stable_tag = "main"
 ci_prefix = "ci"
 commit_prefix = "sha"
 
+[build]
+engine = "podman"
+
 [dockerfile]
 allowed_short_external_images = ["alpine", "busybox"]
 
@@ -26,6 +29,7 @@ global_inputs = [
   "platform-images.toml",
   ".gitlab-ci.yml",
   ".gitlab/**",
+  ".github/workflows/**",
 ]
 """
 

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from platform_images.config import RepositoryConfig
 from platform_images.errors import MissingStableImageError, ProcessError, RegistryError
+from platform_images.models import BuildEngine
 from platform_images.process import ProcessRunner
 from platform_images.references import ReferencePolicy, immutable_reference
 
@@ -112,22 +113,38 @@ class ECRRegistryClient(RegistryClient):
         return immutable_reference(stable, digest)
 
     def promote(self, source: str, destination: str) -> None:
-        _podman_promote(source, destination, runner=self.runner, cwd=self.config.root)
+        _container_promote(source, destination, runner=self.runner, cwd=self.config.root)
 
 
-class PodmanRegistryClient(RegistryClient):
+class ContainerRegistryClient(RegistryClient):
     """Registry transport used by the promotion command."""
 
-    def __init__(self, cwd: Path, runner: ProcessRunner | None = None) -> None:
+    def __init__(
+        self,
+        cwd: Path,
+        runner: ProcessRunner | None = None,
+        engine: BuildEngine = BuildEngine.PODMAN,
+    ) -> None:
         self.cwd = cwd
         self.runner = runner or ProcessRunner()
+        self.engine = engine
 
     def resolve_stable(self, target: str) -> str:
         del target
         raise NotImplementedError("Podman transport does not resolve stable ECR tags")
 
     def promote(self, source: str, destination: str) -> None:
-        _podman_promote(source, destination, runner=self.runner, cwd=self.cwd)
+        _container_promote(
+            source,
+            destination,
+            engine=self.engine,
+            runner=self.runner,
+            cwd=self.cwd,
+        )
+
+
+class PodmanRegistryClient(ContainerRegistryClient):
+    """Backward-compatible Podman registry transport."""
 
 
 def registry_from_environment_json(value: str | None) -> RegistryClient | None:
@@ -146,6 +163,7 @@ def login_to_ecr(
     *,
     cwd: Path,
     runner: ProcessRunner | None = None,
+    engine: BuildEngine = BuildEngine.PODMAN,
 ) -> None:
     normalized, _account, region = ecr_registry_coordinates(registry)
     process = runner or ProcessRunner()
@@ -157,21 +175,23 @@ def login_to_ecr(
     if not password.strip():
         raise RegistryError("AWS returned an empty ECR login password")
     process.run(
-        ["podman", "login", "--username", "AWS", "--password-stdin", normalized],
+        [engine.value, "login", "--username", "AWS", "--password-stdin", normalized],
         cwd=cwd,
         capture_output=True,
         input_text=password,
     )
 
 
-def _podman_promote(
+def _container_promote(
     source: str,
     destination: str,
     *,
     runner: ProcessRunner | None = None,
     cwd: Path | None = None,
+    engine: BuildEngine = BuildEngine.PODMAN,
 ) -> None:
     process = runner or ProcessRunner()
-    process.run(["podman", "pull", source], cwd=cwd)
-    process.run(["podman", "tag", source, destination], cwd=cwd)
-    process.run(["podman", "push", destination], cwd=cwd)
+    executable = engine.value
+    process.run([executable, "pull", source], cwd=cwd)
+    process.run([executable, "tag", source, destination], cwd=cwd)
+    process.run([executable, "push", destination], cwd=cwd)

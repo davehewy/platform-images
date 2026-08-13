@@ -7,9 +7,11 @@ import pytest
 
 from platform_images.config import RepositoryConfig
 from platform_images.errors import MissingStableImageError, ProcessError, RegistryError
+from platform_images.models import BuildEngine
 from platform_images.process import ProcessResult
 from platform_images.references import ReferencePolicy, immutable_reference
 from platform_images.registry import (
+    ContainerRegistryClient,
     ECRRegistryClient,
     PodmanRegistryClient,
     StaticRegistryClient,
@@ -130,6 +132,20 @@ def test_promotion_is_pull_tag_push() -> None:
     ]
 
 
+def test_docker_promotion_is_pull_tag_push() -> None:
+    runner = RegistryRunner()
+    ContainerRegistryClient(
+        Path.cwd(),
+        runner,
+        BuildEngine.DOCKER,  # type: ignore[arg-type]
+    ).promote("registry/base:sha-a", "registry/base:main")
+    assert runner.commands == [
+        ["docker", "pull", "registry/base:sha-a"],
+        ["docker", "tag", "registry/base:sha-a", "registry/base:main"],
+        ["docker", "push", "registry/base:main"],
+    ]
+
+
 def test_ecr_login_uses_registry_region_and_password_stdin() -> None:
     runner = RegistryRunner("secret-token\n")
     registry = "123456789012.dkr.ecr.eu-west-2.amazonaws.com"
@@ -148,3 +164,24 @@ def test_ecr_login_uses_registry_region_and_password_stdin() -> None:
         ],
     ]
     assert runner.inputs == [None, "secret-token\n"]
+
+
+def test_ecr_login_supports_docker_password_stdin() -> None:
+    runner = RegistryRunner("secret-token\n")
+    registry = "123456789012.dkr.ecr.eu-west-2.amazonaws.com"
+
+    login_to_ecr(
+        registry,
+        cwd=Path.cwd(),
+        runner=runner,  # type: ignore[arg-type]
+        engine=BuildEngine.DOCKER,
+    )
+
+    assert runner.commands[-1] == [
+        "docker",
+        "login",
+        "--username",
+        "AWS",
+        "--password-stdin",
+        registry,
+    ]

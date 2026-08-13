@@ -49,8 +49,8 @@ jobs:
       - name: Build wheel and source distribution
         run: uv build
 
-  podman-integration:
-    name: Podman integration
+  container-engine-integration:
+    name: Docker and Podman integration
     needs: quality
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -69,8 +69,10 @@ jobs:
           uv python install 3.12
           uv sync --locked --extra dev
 
-      - name: Install Podman
+      - name: Verify Docker Buildx and install Podman
         run: |
+          docker info
+          docker buildx version
           sudo apt-get update
           sudo apt-get install --yes podman
           podman info

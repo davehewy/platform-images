@@ -28,6 +28,35 @@ def test_invalid_name_and_missing_dockerfile(
     assert codes(root) == {"invalid-target-name", "missing-dockerfile"}
 
 
+def test_containerfile_is_valid_but_both_build_filenames_are_ambiguous(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory({"base": "<missing>"})
+    directory = root / "images" / "base"
+    (directory / "Containerfile").write_text("FROM alpine\n", encoding="utf-8")
+    assert validate_repository(RepositoryConfig.load(root)).valid
+
+    (directory / "Dockerfile").write_text("FROM busybox\n", encoding="utf-8")
+    report = validate_repository(RepositoryConfig.load(root))
+    issue = next(issue for issue in report.errors if issue.code == "ambiguous-build-file")
+    assert "exactly one" in (issue.hint or "")
+
+
+def test_build_engine_configuration_is_validated(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory({"base": "FROM alpine\n"})
+    config_path = root / "platform-images.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            'engine = "podman"', 'engine = "not-an-engine"'
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigurationError, match="not-an-engine"):
+        RepositoryConfig.load(root)
+
+
 def test_unresolved_reference_has_stable_code(
     repository_factory: Callable[[dict[str, str]], Path],
 ) -> None:

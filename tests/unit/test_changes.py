@@ -46,13 +46,14 @@ def test_path_mapping_global_inputs_and_removed_target(
         (
             ChangedPath("M", None, "images/curl/files/config"),
             ChangedPath("D", "images/gone/Dockerfile", None),
+            ChangedPath("D", "images/also-gone/Containerfile", None),
             ChangedPath("M", None, "docs/readme.md"),
         ),
         discover_targets(root),
         config,
     )
     assert changes.changed_targets == {"curl"}
-    assert changes.removed_targets == {"gone"}
+    assert changes.removed_targets == {"also-gone", "gone"}
     assert not changes.global_change
 
     global_changes = map_changes(
@@ -62,6 +63,14 @@ def test_path_mapping_global_inputs_and_removed_target(
     )
     assert global_changes.global_change
     assert global_changes.changed_targets == {"base", "curl"}
+
+    github_workflow_changes = map_changes(
+        (ChangedPath("M", None, ".github/workflows/container-images.yml"),),
+        discover_targets(root),
+        config,
+    )
+    assert github_workflow_changes.global_change
+    assert github_workflow_changes.changed_targets == {"base", "curl"}
 
 
 def test_real_git_modify_add_rename_remove_and_spaces(git_repository: Path) -> None:

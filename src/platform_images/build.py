@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import tempfile
 from collections.abc import Mapping
@@ -10,7 +11,7 @@ from pathlib import Path
 
 from platform_images.errors import PlatformImagesError, ProcessError
 from platform_images.graph import ImageGraph
-from platform_images.models import BuildPlan, BuildPlanTarget
+from platform_images.models import BuildEngine, BuildPlan, BuildPlanTarget
 from platform_images.process import ProcessRunner
 from platform_images.references import immutable_reference
 
@@ -19,10 +20,22 @@ def build_command(
     target: BuildPlanTarget,
     *,
     labels: Mapping[str, str] | None = None,
+    engine: BuildEngine = BuildEngine.PODMAN,
+    push: bool = False,
+    metadata_file: Path | None = None,
 ) -> list[str]:
-    command = ["podman", "build"]
+    if engine is BuildEngine.DOCKER:
+        command = ["docker", "buildx", "build", "--push" if push else "--load"]
+        context_scheme = "docker-image://"
+        if metadata_file is not None:
+            command.extend(["--metadata-file", str(metadata_file)])
+    else:
+        if metadata_file is not None:
+            raise ValueError("Podman builds do not accept a Buildx metadata file")
+        command = ["podman", "build"]
+        context_scheme = "container-image://"
     for dependency, reference in sorted(target.input_refs.items()):
-        command.extend(["--build-context", f"{dependency}=container-image://{reference}"])
+        command.extend(["--build-context", f"{dependency}={context_scheme}{reference}"])
     for name, value in sorted((labels or {}).items()):
         command.extend(["--label", f"{name}={value}"])
     command.extend(["--file", target.dockerfile, "--tag", target.output_ref, target.context])
@@ -35,11 +48,12 @@ def execute_local_plan(
     root: Path,
     dry_run: bool = False,
     runner: ProcessRunner | None = None,
+    engine: BuildEngine = BuildEngine.PODMAN,
 ) -> tuple[str, ...]:
     process = runner or ProcessRunner()
     rendered: list[str] = []
     for target in plan.targets:
-        command = build_command(target)
+        command = build_command(target, engine=engine)
         display = shlex.join(command)
         rendered.append(display)
         if not dry_run:
@@ -94,14 +108,16 @@ def _existing_ci_result(
     output_ref: str,
     identity_labels: Mapping[str, str],
     root: Path,
+    engine: BuildEngine,
 ) -> dict[str, str] | None:
+    executable = engine.value
     try:
-        process.run(["podman", "pull", output_ref], cwd=root, capture_output=True)
+        process.run([executable, "pull", output_ref], cwd=root, capture_output=True)
     except ProcessError:
         return None
     try:
         result = process.run(
-            ["podman", "image", "inspect", output_ref], cwd=root, capture_output=True
+            [executable, "image", "inspect", output_ref], cwd=root, capture_output=True
         )
         parsed = json.loads(result.stdout)
     except (ProcessError, json.JSONDecodeError) as exc:
@@ -139,6 +155,7 @@ def execute_ci_build(
     root: Path,
     environment: Mapping[str, str] | None = None,
     runner: ProcessRunner | None = None,
+    engine: BuildEngine = BuildEngine.PODMAN,
 ) -> dict[str, str]:
     if target_name not in graph.targets:
         raise PlatformImagesError(f"unknown image target: {target_name}")
@@ -184,22 +201,48 @@ def execute_ci_build(
         output_ref=output_ref,
         identity_labels=identity_labels,
         root=root,
+        engine=engine,
     ):
         return existing
     labels = {
         **identity_labels,
         "org.opencontainers.image.created": _created_label(env),
     }
-    process.run(build_command(plan_target, labels=labels), cwd=root)
     with tempfile.TemporaryDirectory(prefix="platform-images-digest-") as directory:
         digest_file = Path(directory) / "digest"
-        process.run(["podman", "push", "--digestfile", str(digest_file), output_ref], cwd=root)
-        try:
-            digest = digest_file.read_text(encoding="utf-8").strip()
-        except FileNotFoundError as exc:
-            raise PlatformImagesError(
-                "podman push did not create the requested digest file"
-            ) from exc
+        if engine is BuildEngine.DOCKER:
+            metadata_file = Path(directory) / "metadata.json"
+            process.run(
+                build_command(
+                    plan_target,
+                    labels=labels,
+                    engine=engine,
+                    push=True,
+                    metadata_file=metadata_file,
+                ),
+                cwd=root,
+            )
+            try:
+                metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
+                digest = metadata["containerimage.digest"]
+            except (FileNotFoundError, json.JSONDecodeError, KeyError, TypeError) as exc:
+                raise PlatformImagesError(
+                    "docker buildx did not write a valid containerimage.digest"
+                ) from exc
+        else:
+            process.run(build_command(plan_target, labels=labels, engine=engine), cwd=root)
+            process.run(
+                ["podman", "push", "--digestfile", str(digest_file), output_ref],
+                cwd=root,
+            )
+            try:
+                digest = digest_file.read_text(encoding="utf-8").strip()
+            except FileNotFoundError as exc:
+                raise PlatformImagesError(
+                    "podman push did not create the requested digest file"
+                ) from exc
+    if not isinstance(digest, str) or re.fullmatch(r"sha256:[0-9A-Fa-f]+", digest) is None:
+        raise PlatformImagesError(f"container engine returned an invalid image digest: {digest!r}")
     return _result(target_name, output_ref, digest)
 
 

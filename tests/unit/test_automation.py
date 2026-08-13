@@ -53,6 +53,14 @@ def test_github_actions_are_immutable_and_ci_gates_release() -> None:
         for step in release_job["steps"]  # type: ignore[index]
     )
 
+    integration = ci["jobs"]["container-engine-integration"]  # type: ignore[index]
+    integration_script = "\n".join(
+        str(step.get("run", ""))
+        for step in integration["steps"]  # type: ignore[index]
+    )
+    assert "docker buildx version" in integration_script
+    assert "podman info" in integration_script
+
 
 def test_release_workflow_builds_all_supported_standalone_platforms() -> None:
     release = load_workflow("release.yml")

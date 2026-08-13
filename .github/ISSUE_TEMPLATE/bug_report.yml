@@ -30,15 +30,15 @@ body:
     id: environment
     attributes:
       label: Environment
-      description: Operating system, CPU architecture, Python version if applicable, and GitLab version if relevant.
-      placeholder: Ubuntu 24.04, AMD64, standalone executable, GitLab 18.x
+      description: Operating system, CPU architecture, Docker or Podman version, and GitHub Actions or GitLab version if relevant.
+      placeholder: Ubuntu 24.04, AMD64, Docker 29 / Buildx 0.30, GitHub Actions
     validations:
       required: true
   - type: textarea
     id: reproduction
     attributes:
       label: Minimal reproduction
-      description: Include the relevant image layout, Dockerfile relationships, configuration, command, and Git change.
+      description: Include the relevant image layout, Dockerfile or Containerfile relationships, configuration, command, and Git change.
       placeholder: Describe the smallest repository setup and commands that reproduce the problem.
     validations:
       required: true

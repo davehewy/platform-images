@@ -26,14 +26,20 @@ information already exists in instructions such as `FROM base`, but normal CI pa
 understand it. They also do not solve how independently scheduled jobs pass the exact newly built
 parent image to their consumers.
 
-This tool discovers `images/<name>/Dockerfile` targets, infers their **build-time** dependency graph,
-maps a Git diff onto that graph, follows changes downstream, and generates the required GitLab jobs
-dynamically. Each job receives exact image references, builds in deterministic topological order,
-and pushes before dependent jobs run. A default-branch pipeline promotes the affected graph to
-stable tags only after the complete graph build succeeds.
+This tool discovers `images/<name>/Dockerfile` or `images/<name>/Containerfile` targets, infers
+their **build-time** dependency graph, maps a Git diff onto that graph, and follows changes
+downstream. It can render dynamic GitLab child-pipeline jobs or generate a complete GitHub Actions
+workflow. Docker and Podman are both supported build engines. Every build receives exact image
+references, and a default-branch pipeline promotes the affected graph to stable tags only after the
+complete graph build succeeds.
 
-There is no second image catalogue or hand-maintained CI dependency list. The Dockerfiles and Git
-history remain the source of truth.
+There is no second image catalogue or hand-maintained CI dependency list. The Dockerfiles or
+Containerfiles and Git history remain the source of truth.
+
+The inferred structure is a **directed acyclic graph (DAG)**. A dependency edge records that one
+target consumes another; validation rejects any directed cycle and prints its complete path before
+planning. Valid plans are deterministic topological projections of that DAG: dependencies build
+before consumers, while unrelated nodes remain parallelizable.
 
 ## Contents
 
@@ -47,6 +53,8 @@ history remain the source of truth.
 - [Recommended adoption flow](#recommended-adoption-flow)
 - [Command guide](#command-guide)
 - [CI operating model](#ci-operating-model)
+- [GitHub Actions workflow generation](docs/github-actions.md)
+- [GitLab child pipelines](docs/gitlab-ci.md)
 - [Quality and integration checks](#quality-and-integration-checks)
 - [Support and contributing](#support-and-contributing)
 - [License](#license)
@@ -60,11 +68,13 @@ For a platform or DevOps team, it solves:
 - rebuilding a changed image and every transitive consumer, while leaving unrelated images alone;
 - building an affected consumer against either its newly built parent or an immutable digest of the
   existing stable parent;
-- turning the calculated graph into a GitLab child pipeline with correct `needs` edges;
+- turning the calculated graph into a GitLab child pipeline or dependency-layered GitHub Actions
+  workflow;
+- executing the same exact-reference build contract with Docker Buildx or Podman;
 - using unique merge-request and commit tags, with graph-wide stable promotion on `main`;
 - making retries safe by verifying image identity before reusing an immutable output tag; and
 - failing early on cycles, missing targets, ambiguous short image names, unsafe paths, and malformed
-  Dockerfiles.
+  Dockerfiles or Containerfiles.
 
 It intentionally models **container build dependencies**, not runtime service relationships. It
 will understand `FROM base` but not that an API container talks to PostgreSQL at runtime. It also
@@ -117,8 +127,8 @@ Silicon runners. Windows executables are built natively for x86_64 and ARM64; Gi
 classifies its hosted Windows ARM64 runner as public preview.
 
 The executable bundles Python and the Python package dependencies. Commands still expect the tools
-they orchestrate to exist: Git for change inspection, Podman for image builds, and AWS CLI plus
-credentials for ECR login and stable-reference resolution.
+they orchestrate to exist: Git for change inspection, Docker Buildx or Podman for image builds, and
+AWS CLI plus credentials for ECR login and stable-reference resolution.
 
 ### Install as a Python tool
 
@@ -171,7 +181,8 @@ uv run platform images graph
 uv run platform images build curl --dry-run
 ```
 
-Remove `--dry-run` when Podman is installed and you are ready to execute the build.
+Remove `--dry-run` when the configured engine is available. Podman remains the backward-compatible
+default; select Docker per command with `--engine docker`, or set it once in configuration.
 
 ## The checked-in example
 
@@ -224,6 +235,9 @@ platform images build curl --dry-run
 
 # With GitLab registry and CI variables present:
 platform images plan --ci --all --format gitlab
+
+# Generate a ready-to-customize GitHub Actions workflow (Docker by default):
+platform images generate-workflow github --output .github/workflows/container-images.yml
 ```
 
 ## Worked examples
@@ -243,7 +257,7 @@ Validation passed (2 image targets).
 
 $ platform images show curl
 curl
-  dockerfile: images/curl/Dockerfile
+  build_file: images/curl/Dockerfile
   dependencies: base
   dependents: none
 
@@ -267,6 +281,18 @@ podman build --build-context base=container-image://localhost/platform-images/ba
 
 Without `--dry-run`, those commands execute in that order. The second build does not rewrite
 `FROM base`; Podman binds the logical name through a named `container-image://` build context.
+
+The equivalent Docker Buildx plan uses Docker's `docker-image://` named context and loads each
+local result for its consumer:
+
+```console
+$ platform images build curl --engine docker --dry-run
+docker buildx build --load --file images/base/Dockerfile --tag localhost/platform-images/base:dev images/base
+docker buildx build --load --build-context base=docker-image://localhost/platform-images/base:dev --file images/curl/Dockerfile --tag localhost/platform-images/curl:dev images/curl
+```
+
+Both engines consume the same discovered graph and exact references; the engine changes execution,
+not selection.
 
 When the stable local parent is already present and only the leaf needs rebuilding, opt out of the
 upstream closure explicitly:
@@ -391,9 +417,56 @@ image_curl:
 ```
 
 The `needs` edge is derived from the Dockerfile. Because every job pushes its unique output before
-completion, `image_curl` can run on a different GitLab runner with no shared Podman image store.
+completion, `image_curl` can run on a different GitLab runner with no shared container-engine image
+store.
 
-### Worked example 6: merge request versus default branch
+### Worked example 6: generate a GitHub Actions workflow
+
+Generate the complete workflow into the conventional location:
+
+```bash
+platform images generate-workflow github \
+  --default-branch main \
+  --engine docker \
+  --output .github/workflows/container-images.yml
+```
+
+For `base -> curl`, the workflow has two static build layers. The planning job calculates the
+affected set once and emits a dynamic matrix for each layer:
+
+```text
+validate -> plan -> image_layer_0 [base] -> image_layer_1 [curl] -> promote
+```
+
+Independent targets in the same layer run in parallel. A changed leaf with no rebuilt parent moves
+into the first runtime layer and consumes its unchanged parent by stable digest. Empty layers use a
+no-op sentinel because GitHub rejects an empty matrix. The authoritative JSON plan travels between
+jobs as an artifact, and each matrix entry reloads and validates that plan before building its exact
+target.
+
+GitHub job dependencies are part of the checked-in workflow definition, so they cannot be invented
+after a run starts. The generator solves that constraint by creating enough static layers for the
+current graph and filling them dynamically from the change plan. If a graph edit becomes deeper
+than the checked-in workflow, planning fails with a regeneration instruction instead of dropping a
+dependency. Regenerate and commit the workflow whenever image relationships change.
+
+The default workflow uses Docker Buildx on `ubuntu-latest` and AWS OIDC. Configure repository
+variables `PLATFORM_IMAGES_REGISTRY`, `AWS_ROLE_TO_ASSUME`, and `AWS_REGION`. Pull requests from
+forks run graph validation but do not receive registry credentials or execute image builds. For a
+pre-authenticated self-hosted runner with Podman:
+
+```bash
+platform images generate-workflow github \
+  --runner self-hosted \
+  --engine podman \
+  --aws-auth ambient \
+  --output .github/workflows/container-images.yml
+```
+
+See [GitHub Actions](docs/github-actions.md) for the trust model, generated job structure, required
+variables, and regeneration contract.
+
+### Worked example 7: merge request versus default branch
 
 Merge requests create isolated images and never update the stable alias:
 
@@ -423,7 +496,7 @@ promote_main:
 If either build fails, promotion never starts. Consumers therefore do not observe a half-promoted
 set where `base:main` is new but `curl:main` is old.
 
-### Worked example 7: no image-related change
+### Worked example 8: no image-related change
 
 A documentation change outside configured global inputs affects no target:
 
@@ -446,7 +519,7 @@ no_image_changes:
 The parent pipeline remains structurally identical whether zero, one, or hundreds of images are
 selected.
 
-### Worked example 8: a shared build input changes
+### Worked example 9: a shared build input changes
 
 Some files affect every image even though they do not live beneath `images/`. Add those paths to
 `changes.global_inputs`:
@@ -468,6 +541,7 @@ Controller-critical paths are always global even if omitted from configuration:
 ```text
 .gitlab-ci.yml
 .gitlab/**
+.github/workflows/**
 platform-images.toml
 pyproject.toml
 src/platform_images/**
@@ -477,9 +551,10 @@ uv.lock
 These mandatory patterns cannot be configured away, because a controller or pipeline change must
 re-evaluate the entire image set safely.
 
-### Worked example 9: add another local image
+### Worked example 10: add another local image
 
-Add a direct directory; do not add a corresponding GitLab job:
+Add a direct directory with exactly one `Dockerfile` or `Containerfile`; do not hand-write a
+corresponding CI job:
 
 ```text
 images/debug/Dockerfile
@@ -516,9 +591,11 @@ RUN --mount=from=curl,target=/tools,ro cp /tools/usr/bin/curl /usr/local/bin/cur
 ```
 
 Local references in `COPY`/`ADD --from` and `RUN --mount=from` participate in the same graph.
-Numeric and named stages inside one Dockerfile remain Dockerfile stages rather than image targets.
+Numeric and named stages inside one build file remain stages rather than image targets. A
+`Containerfile` uses the same instruction syntax and graph rules as a `Dockerfile`; if both names
+exist in one target directory validation fails rather than guessing which is authoritative.
 
-### Worked example 10: keep unrelated images independent
+### Worked example 11: keep unrelated images independent
 
 Not every image needs to belong to the same chain. Add an independent utility image:
 
@@ -553,10 +630,11 @@ The selection behavior is now:
 This is the central reason to calculate a graph instead of maintaining a single “images changed”
 switch: independent images stay cheap, while dependent images stay correct.
 
-### Worked example 11: bootstrap and recovery
+### Worked example 12: bootstrap and recovery
 
-On the first default-branch pipeline GitLab supplies an all-zero `CI_COMMIT_BEFORE_SHA`. There is no
-valid previous commit to compare, so the controller deliberately builds the complete graph.
+On the first default-branch pipeline, GitLab supplies an all-zero `CI_COMMIT_BEFORE_SHA` and GitHub
+supplies an all-zero `github.event.before`. There is no valid previous commit to compare, so the
+controller deliberately builds the complete graph.
 
 For a manual bootstrap or recovery rebuild, request the same behavior explicitly:
 
@@ -569,7 +647,7 @@ Use `--ci --all` after introducing the tool, creating a new registry namespace, 
 invalidating every stable image. Normal pipelines should use `--ci` so Git determines the minimal
 affected set.
 
-### Worked example 12: catch dependency mistakes before CI spends money
+### Worked example 13: catch dependency mistakes before CI spends money
 
 If `curl` accidentally says `FROM bsae`, validation does not silently pull an unrelated public
 image:
@@ -599,6 +677,9 @@ stable_tag = "main"
 ci_prefix = "ci"
 commit_prefix = "sha"
 
+[build]
+engine = "podman"
+
 [dockerfile]
 allowed_short_external_images = ["alpine", "busybox"]
 
@@ -610,6 +691,7 @@ global_inputs = [
   "platform-images.toml",
   ".gitlab-ci.yml",
   ".gitlab/**",
+  ".github/workflows/**",
 ]
 ```
 
@@ -639,7 +721,31 @@ The account and region are parsed from that hostname and passed explicitly to AW
 The stable tag is deliberately separate from immutable output tags. Builds publish unique outputs;
 promotion moves only the stable alias after success.
 
-### Dockerfile reference settings
+### Build engine settings
+
+| Setting | What it controls | When and why to change it |
+| --- | --- | --- |
+| `build.engine` | Default executor for local builds, CI builds, ECR login, and promotion. Accepted values are `podman` and `docker`. | Keep `podman` for daemonless/rootless runners and existing GitLab fleets. Choose `docker` where Docker Buildx is already the standard, including most GitHub-hosted runner setups. Override an individual execution command with `--engine docker` or `--engine podman`. |
+
+Docker uses `docker buildx build`, `docker-image://` named contexts, and Buildx's registry digest
+metadata. Podman uses `podman build`, `container-image://` named contexts, and `podman push
+--digestfile`. Planning, tags, dependency order, OCI identity labels, retry collision checks, and
+promotion gates are identical.
+
+### DAG and edge semantics
+
+If `images/curl/Dockerfile` contains `FROM base`, the stored relationship is “`curl` depends on
+`base`”. Human tree output places `base` above `curl`, and schedulers receive the corresponding
+execution constraint “build `base` before `curl`”. Multi-parent relationships from `FROM`,
+`COPY`/`ADD --from`, and `RUN --mount=from` remain one DAG rather than being flattened into a tree;
+the text view may repeat a node, while `graph --format json` is the authoritative representation.
+
+A repository containing `a -> b -> a` is invalid. `platform images validate` reports the complete,
+deterministic cycle, and all graph-dependent commands stop before Git, Docker, Podman, AWS, or CI
+can schedule work. GitLab then maps direct selected edges to `needs`; GitHub maps the same selected
+DAG to topological build layers.
+
+### Dockerfile and Containerfile reference settings
 
 `dockerfile.allowed_short_external_images` is the explicit allowlist for unqualified external
 repository names:
@@ -680,29 +786,30 @@ inputs listed earlier.
 | `PLATFORM_IMAGES_ROOT` | Run against a repository root other than the current directory. | Useful for wrappers, monorepo tooling, and local diagnostics invoked from another directory. |
 | The variable named by `registry_environment_variable` | Registry hostname used for CI outputs, stable lookups, login, and promotion. | Required for CI and change-based plans; normally define it as a protected GitLab project/group variable. |
 | `PLATFORM_IMAGES_STABLE_REFS` | JSON mapping of target names to immutable image references. | Use in tests, offline plan previews, or a non-ECR registry adapter. In normal ECR CI, omit it so the tool resolves the configured stable tag through AWS. |
-| `CI_PIPELINE_ID` | Makes merge-request tags unique to a pipeline. | Supplied automatically by GitLab and required for merge-request planning. |
-| `CI_COMMIT_SHA`, `CI_PROJECT_URL` | Identify and label a CI build. | Supplied automatically by GitLab; CI builds fail rather than emit untraceable images when either is absent. |
+| `CI_PIPELINE_ID` | Makes merge-request tags unique to a pipeline. | Supplied automatically by GitLab. The generated GitHub workflow maps `github.run_id` to it. |
+| `CI_COMMIT_SHA`, `CI_PROJECT_URL` | Identify and label a CI build. | Supplied by GitLab; the generated GitHub workflow maps the checked-out head SHA and repository URL. CI builds fail rather than emit untraceable images when either is absent. |
 | `CI_MERGE_REQUEST_DIFF_BASE_SHA` | Preferred merge-request comparison base. | Supplied by GitLab merge-request pipelines. |
-| `CI_COMMIT_BEFORE_SHA`, `CI_DEFAULT_BRANCH`, `CI_COMMIT_BRANCH` | Select the comparison and distinguish default-branch promotion from review builds. | Supplied by GitLab. Fetch full history with `GIT_DEPTH: "0"` so fallback merge-base calculation works. |
+| `CI_COMMIT_BEFORE_SHA`, `CI_DEFAULT_BRANCH`, `CI_COMMIT_BRANCH` | Select the comparison and distinguish default-branch promotion from review builds. | Supplied by GitLab or mapped from GitHub event context by the generated workflow. Full Git history is required. |
 | `SOURCE_DATE_EPOCH` or `CI_COMMIT_TIMESTAMP` | Sets the OCI creation timestamp label. | Use `SOURCE_DATE_EPOCH` for reproducible build metadata; otherwise GitLab's commit timestamp is used when present. |
 
 Never put registry credentials in `platform-images.toml`. `platform images registry-login` obtains a
-regional ECR token from the AWS CLI and passes it to Podman over stdin. Use the organisation's
-short-lived workload identity for AWS authentication.
+regional ECR token from the AWS CLI and passes it to the selected Docker or Podman login command
+over stdin. Use the organisation's short-lived workload identity for AWS authentication.
 
 ## Recommended adoption flow
 
-1. Put every owned target at `images/<name>/Dockerfile`; keep its ordinary context files in the same
-   directory.
+1. Put every owned target at `images/<name>/Dockerfile` or `images/<name>/Containerfile`; keep
+   exactly one of those names and keep ordinary context files in the same directory.
 2. Replace internal registry references between these images with logical names such as
    `FROM base`.
 3. Configure the registry namespace, stable tag, approved short external images, and genuine shared
    inputs in `platform-images.toml`.
-4. Run `platform images validate`, `graph`, and `build <leaf> --dry-run` locally. Review the inferred
-   graph with image owners.
+4. Choose `build.engine`, then run `platform images validate`, `graph`, and `build <leaf> --dry-run`
+   locally. Review the inferred graph with image owners.
 5. Create the ECR repositories and runner permissions described in [ECR setup](docs/ecr-setup.md).
-6. Add the checked-in parent pipeline and `.image-build` template described in
-   [GitLab CI](docs/gitlab-ci.md). Keep full Git history available to the planning job.
+6. Either add the parent/child setup in [GitLab CI](docs/gitlab-ci.md), or generate and commit
+   `.github/workflows/container-images.yml` using [GitHub Actions](docs/github-actions.md). Keep
+   full Git history available to the planning job.
 7. Run one `--ci --all` default-branch bootstrap to populate stable tags.
 8. Let ordinary merge-request and default-branch pipelines use `--ci` to calculate the minimal
    rebuild set.
@@ -717,26 +824,33 @@ short-lived workload identity for AWS authentication.
 | `platform images show <name>` | Inspect one target's direct dependencies and dependents. |
 | `platform images validate` | Gate commits before planning or building. |
 | `platform images graph [--format json]` | Review or export the complete dependency graph. |
-| `platform images build <name> [--dry-run] [--no-deps]` | Build locally with deterministic dependency binding. |
+| `platform images build <name> [--dry-run] [--no-deps] [--engine docker\|podman]` | Build locally with deterministic dependency binding using the configured or selected engine. |
 | `platform images changed --base <sha> --head <sha>` | Show directly changed targets and removed target directories. |
 | `platform images affected --base <sha> --head <sha>` | Show the topologically ordered downstream rebuild set. |
 | `platform images plan --image <name>` | Preview a local plan for one or more explicitly selected targets. Repeat `--image` to select several. |
 | `platform images plan --all` | Preview a complete local build plan. |
-| `platform images plan --ci` | Calculate the GitLab-aware change plan and exact references. |
+| `platform images plan --ci` | Calculate a CI change plan and exact references from normalized GitLab/GitHub environment inputs. |
 | `platform images plan --ci --all` | Force a complete CI bootstrap or recovery plan. |
 | `platform images render-plan image-plan.json --format gitlab` | Validate and render the persisted plan into child-pipeline YAML. |
-| `platform images ci-build ...` | Execute one generated CI target with exact input/output references; normally called only by generated jobs. |
-| `platform images registry-login` | Authenticate Podman to the configured ECR registry without exposing the token. |
-| `platform images promote ...` | Move a successfully built immutable output to a stable alias; normally called only by the promotion job. |
+| `platform images generate-workflow github [--engine docker\|podman] [--output <path>]` | Generate a complete dependency-layered GitHub Actions workflow. |
+| `platform images ci-build ... [--engine docker\|podman]` | Execute one CI target with exact input/output references; normally called only by generated jobs. |
+| `platform images build-plan-target <plan> <name>` | Strictly reload a persisted plan and build its named target; used by GitHub matrix jobs. |
+| `platform images github-matrix <plan> --max-layers <n>` | Turn a persisted plan into dependency-safe GitHub matrix outputs; used by generated workflows. |
+| `platform images registry-login [--engine docker\|podman]` | Authenticate the selected engine to ECR without exposing the token. |
+| `platform images promote ... [--engine docker\|podman]` | Move a successfully built immutable output to a stable alias. |
+| `platform images promote-plan <plan> [--engine docker\|podman]` | Promote a complete default-branch plan only after its generated build graph succeeds. |
 
 ## CI operating model
 
-The checked-in parent pipeline runs quality checks, generates `image-plan.json`, renders
-`generated-images.yml`, and mirrors the child pipeline. It does not contain one checked-in job per
-image.
+GitLab generates one child job per affected target, with direct graph edges rendered as `needs`.
+GitHub Actions cannot add arbitrary job dependencies after a run starts, so the generated workflow
+contains static topological layers and fills each layer with an affected-target matrix at runtime.
+Both consume the same authoritative `image-plan.json` and preserve parallelism between independent
+targets.
 
 Each generated job uses only its direct local dependencies in `needs`. It pushes before completing,
-so jobs do not rely on a shared runner cache. Retries pull the exact output tag and inspect identity
+so jobs do not rely on a shared runner cache. Docker and Podman retries pull the exact output tag
+and inspect identity
 labels for target, commit, source, and dependency references. A matching image is reused by digest;
 a mismatched immutable tag fails as a collision.
 
@@ -745,7 +859,8 @@ needs every selected build. Removed targets are reported but are not deleted fro
 deletion policy remain explicit infrastructure responsibilities.
 
 See [architecture](docs/architecture.md), [adding an image](docs/adding-an-image.md),
-[GitLab CI](docs/gitlab-ci.md), [ECR setup](docs/ecr-setup.md), and
+[GitHub Actions](docs/github-actions.md), [GitLab CI](docs/gitlab-ci.md),
+[ECR setup](docs/ecr-setup.md), and
 [contributing and releases](CONTRIBUTING.md).
 
 ## Quality and integration checks
@@ -757,15 +872,15 @@ uv run --locked --extra dev pytest -m integration
 uv build
 ```
 
-The Podman integration test builds and runs the `base -> curl` topology. It is skipped locally when
-Podman is absent or unavailable. GitHub CI requires Podman, repeats the locked quality suite, and
+The integration suite builds and runs the `base -> curl` topology with both Podman and Docker
+Buildx, skipping only an engine that is unavailable. GitHub CI repeats the locked quality suite and
 builds the wheel and source distribution. Conventional Commit messages drive Python Semantic
 Release after `main` passes CI.
 
 ## Support and contributing
 
-Found incorrect graph selection, an unsupported Dockerfile relationship, or a generated pipeline
-problem? [Open a structured bug report](https://github.com/davehewy/platform-images/issues/new?template=bug_report.yml).
+Found incorrect graph selection, an unsupported Dockerfile or Containerfile relationship, or a
+generated pipeline problem? [Open a structured bug report](https://github.com/davehewy/platform-images/issues/new?template=bug_report.yml).
 Ideas for broader repository layouts or CI behaviour are welcome through the
 [feature request form](https://github.com/davehewy/platform-images/issues/new?template=feature_request.yml).
 Please search [existing issues](https://github.com/davehewy/platform-images/issues) first and never

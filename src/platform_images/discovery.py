@@ -17,10 +17,15 @@ def discover_targets(root: Path) -> dict[str, ImageTarget]:
     for directory in sorted(
         (entry for entry in images_dir.iterdir() if entry.is_dir()), key=lambda path: path.name
     ):
+        dockerfile = directory / "Dockerfile"
+        containerfile = directory / "Containerfile"
+        build_file = (
+            dockerfile if dockerfile.exists() or not containerfile.exists() else containerfile
+        )
         targets[directory.name] = ImageTarget(
             name=directory.name,
             directory=directory,
-            dockerfile=directory / "Dockerfile",
+            dockerfile=build_file,
             context=directory,
         )
     return targets

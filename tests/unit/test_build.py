@@ -15,7 +15,7 @@ from platform_images.config import RepositoryConfig
 from platform_images.discovery import discover_targets
 from platform_images.errors import PlatformImagesError, ProcessError
 from platform_images.graph import build_graph
-from platform_images.models import BuildPlanTarget
+from platform_images.models import BuildEngine, BuildPlanTarget
 from platform_images.process import ProcessResult
 
 
@@ -41,11 +41,15 @@ class RecordingRunner:
         del cwd, env, capture_output
         command = list(arguments)
         self.commands.append(command)
-        if command[:2] == ["podman", "pull"]:
+        if len(command) >= 2 and command[0] in {"podman", "docker"} and command[1] == "pull":
             if self.existing_labels is None:
                 raise ProcessError("image not found")
             return ProcessResult("", "", 0)
-        if command[:3] == ["podman", "image", "inspect"]:
+        if (
+            len(command) >= 3
+            and command[0] in {"podman", "docker"}
+            and command[1:3] == ["image", "inspect"]
+        ):
             return ProcessResult(
                 json.dumps(
                     [
@@ -63,6 +67,14 @@ class RecordingRunner:
                 raise ProcessError("push failed")
             digest_path = Path(command[command.index("--digestfile") + 1])
             digest_path.write_text("sha256:deadbeef\n", encoding="utf-8")
+        if command[:4] == ["docker", "buildx", "build", "--push"]:
+            if self.fail_push:
+                raise ProcessError("push failed")
+            metadata_path = Path(command[command.index("--metadata-file") + 1])
+            metadata_path.write_text(
+                json.dumps({"containerimage.digest": "sha256:cafebabe"}),
+                encoding="utf-8",
+            )
         return ProcessResult("", "", 0)
 
 
@@ -92,6 +104,63 @@ def test_build_command_uses_sorted_named_contexts_and_argument_list() -> None:
         "localhost/platform-images/app:dev",
         "images/app",
     ]
+
+
+def test_docker_buildx_uses_docker_image_contexts_and_loads_local_output() -> None:
+    target = BuildPlanTarget(
+        "app",
+        ("selected",),
+        ("base",),
+        ("base",),
+        "images/app/Containerfile",
+        "images/app",
+        "localhost/platform-images/app:dev",
+        {"base": "localhost/platform-images/base:dev"},
+        False,
+    )
+
+    assert build_command(target, engine=BuildEngine.DOCKER) == [
+        "docker",
+        "buildx",
+        "build",
+        "--load",
+        "--build-context",
+        "base=docker-image://localhost/platform-images/base:dev",
+        "--file",
+        "images/app/Containerfile",
+        "--tag",
+        "localhost/platform-images/app:dev",
+        "images/app",
+    ]
+
+
+def test_docker_ci_build_pushes_with_buildx_and_reads_registry_digest(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory({"base": "FROM alpine\n"})
+    graph = build_graph(discover_targets(root), RepositoryConfig.load(root))
+    runner = RecordingRunner()
+
+    result = execute_ci_build(
+        graph,
+        "base",
+        "registry/platform-images/base:ci-1-abc",
+        {},
+        root=root,
+        environment={
+            "CI_COMMIT_SHA": "abc",
+            "CI_PROJECT_URL": "https://github.com/example/project",
+        },
+        runner=runner,  # type: ignore[arg-type]
+        engine=BuildEngine.DOCKER,
+    )
+
+    assert runner.commands[0][:2] == ["docker", "pull"]
+    build = runner.commands[1]
+    assert build[:4] == ["docker", "buildx", "build", "--push"]
+    assert "--metadata-file" in build
+    assert result["digest"] == "sha256:cafebabe"
+    assert result["immutable_reference"] == ("registry/platform-images/base@sha256:cafebabe")
 
 
 def test_ci_build_validates_inputs_pushes_and_reads_digest(
