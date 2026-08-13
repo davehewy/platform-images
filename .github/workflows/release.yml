@@ -130,7 +130,8 @@ jobs:
 
       - name: Build and smoke-test standalone archive
         run: >-
-          uv run --locked --extra release python scripts/build-standalone.py
+          uv run --python "${{ steps.python.outputs.python-path }}" --locked --extra release
+          python scripts/build-standalone.py
           --version "${{ needs.release.outputs.version }}"
           --os "${{ matrix.os }}"
           --arch "${{ matrix.arch }}"
