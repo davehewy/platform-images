@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.3.1 (2026-08-13)
+
+### Bug Fixes
+
+- Build native Windows release archives
+  ([`9436694`](https://github.com/davehewy/platform-images/commit/943669437aeaa2316fb2b764440ba54f91ccf039))
+
+
 ## v0.3.0 (2026-08-13)
 
 ### Features
