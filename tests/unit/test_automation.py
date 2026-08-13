@@ -54,6 +54,47 @@ def test_github_actions_are_immutable_and_ci_gates_release() -> None:
     )
 
 
+def test_release_workflow_builds_all_supported_standalone_platforms() -> None:
+    release = load_workflow("release.yml")
+    jobs = release["jobs"]
+    assert isinstance(jobs, dict)
+    standalone = jobs["standalone"]
+    publish = jobs["publish-standalone"]
+    assert isinstance(standalone, dict)
+    assert isinstance(publish, dict)
+    entries = standalone["strategy"]["matrix"]["include"]  # type: ignore[index]
+    assert {(entry["os"], entry["arch"]) for entry in entries} == {
+        ("linux", "amd64"),
+        ("linux", "arm64"),
+        ("darwin", "amd64"),
+        ("darwin", "arm64"),
+    }
+    assert standalone["needs"] == "release"
+    assert publish["needs"] == ["release", "standalone"]
+    assert publish["permissions"] == {"contents": "write"}
+
+
+def test_standalone_archive_names_are_stable_for_latest_downloads() -> None:
+    release = load_workflow("release.yml")
+    entries = release["jobs"]["standalone"]["strategy"]["matrix"]["include"]  # type: ignore[index]
+    assert {entry["platform"] for entry in entries} == {
+        "linux-amd64",
+        "linux-arm64",
+        "darwin-amd64",
+        "darwin-arm64",
+    }
+
+
+def test_installer_is_executable_and_references_every_release_asset() -> None:
+    installer = ROOT / "scripts" / "install.sh"
+    assert installer.stat().st_mode & 0o111
+    contents = installer.read_text(encoding="utf-8")
+    assert "platform-images-${operating_system}-${architecture}.tar.gz" in contents
+    assert "SHA256SUMS" in contents
+    assert "linux" in contents
+    assert "darwin" in contents
+
+
 def test_release_and_commit_conventions_share_project_version() -> None:
     with (ROOT / "pyproject.toml").open("rb") as handle:
         project = tomllib.load(handle)

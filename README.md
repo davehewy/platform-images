@@ -32,7 +32,22 @@ stable tags only after the complete graph build succeeds.
 There is no second image catalogue or hand-maintained CI dependency list. The Dockerfiles and Git
 history remain the source of truth.
 
-## What this solves—and what it does not
+## Contents
+
+- [What this solves and what it does not](#what-this-solves-and-what-it-does-not)
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [The checked-in example](#the-checked-in-example)
+- [Demonstration](#demonstration)
+- [Worked examples](#worked-examples)
+- [Configuration capabilities](#configuration-capabilities)
+- [Recommended adoption flow](#recommended-adoption-flow)
+- [Command guide](#command-guide)
+- [CI operating model](#ci-operating-model)
+- [Quality and integration checks](#quality-and-integration-checks)
+- [License](#license)
+
+## What this solves and what it does not
 
 For a platform or DevOps team, it solves:
 
@@ -52,26 +67,93 @@ will understand `FROM base` but not that an API container talks to PostgreSQL at
 does not rebuild merely because a remote tag such as `alpine:3.22` changed without a Git change;
 pin external bases by digest or use a dependency-update process when that distinction matters.
 
-## Five-minute quick start
+## Installation
 
-Python 3.12 and Podman are expected. For a locked development installation:
+### Standalone executable (recommended)
+
+The quickest installation on Linux or macOS downloads the correct archive for the current machine,
+verifies it against the release checksum, and installs `platform` into `~/.local/bin`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/davehewy/platform-images/main/scripts/install.sh | sh
+```
+
+Install a specific version or choose another destination with environment variables:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/davehewy/platform-images/main/scripts/install.sh |
+  PLATFORM_IMAGES_VERSION=0.2.0 PLATFORM_IMAGES_INSTALL_DIR=/usr/local/bin sh
+```
+
+Each [GitHub release](https://github.com/davehewy/platform-images/releases) provides:
+
+| System | Architecture | Release asset |
+| --- | --- | --- |
+| GNU/Linux | AMD64 / x86_64 | `platform-images-linux-amd64.tar.gz` |
+| GNU/Linux | ARM64 / AArch64 | `platform-images-linux-arm64.tar.gz` |
+| macOS / Darwin | Intel AMD64 | `platform-images-darwin-amd64.tar.gz` |
+| macOS / Darwin | Apple Silicon ARM64 | `platform-images-darwin-arm64.tar.gz` |
+
+Every archive contains the `platform` executable, README, and MIT license. `SHA256SUMS` covers all
+four archives. The Linux executables are built on Ubuntu 22.04 and target modern glibc-based 64-bit
+distributions. The macOS executables are built natively on Intel and Apple Silicon runners.
+
+The executable bundles Python and the Python package dependencies. Commands still expect the tools
+they orchestrate to exist: Git for change inspection, Podman for image builds, and AWS CLI plus
+credentials for ECR login and stable-reference resolution.
+
+### Install as a Python tool
+
+If Python 3.12 is already part of the team's toolchain, `uv` can install an isolated, pinned release:
+
+```bash
+uv tool install --python 3.12 \
+  "git+https://github.com/davehewy/platform-images.git@v0.2.0"
+```
+
+The universal `platform_images-<version>-py3-none-any.whl` and conventional Python source
+`platform_images-<version>.tar.gz` are also attached to each GitHub release. The wheel is portable
+across CPU architectures and operating systems with Python 3.12.
+
+### Install for development
+
+Clone the repository and install its locked development environment:
 
 ```bash
 uv sync --locked --extra dev
-
-uv run platform images list
-uv run platform images validate
-uv run platform images graph
-uv run platform images build curl
 ```
 
-An editable pip installation also exposes the `platform` command directly:
+This keeps Ruff, pytest, pre-commit, and Commitizen available. An ordinary editable pip environment
+also works:
 
 ```bash
-python -m venv .venv
+python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 ```
+
+## Quick start
+
+From the repository root:
+
+```bash
+platform images list
+platform images validate
+platform images graph
+platform images build curl --dry-run
+```
+
+If installed through the development environment without activating it, prefix commands with
+`uv run`:
+
+```bash
+uv run platform images list
+uv run platform images validate
+uv run platform images graph
+uv run platform images build curl --dry-run
+```
+
+Remove `--dry-run` when Podman is installed and you are ready to execute the build.
 
 ## The checked-in example
 
@@ -126,7 +208,9 @@ platform images build curl --dry-run
 platform images plan --ci --all --format gitlab
 ```
 
-## Worked example 1: inspect what the repository owns
+## Worked examples
+
+### Worked example 1: inspect what the repository owns
 
 Use this during adoption, review, or incident diagnosis to confirm that discovery agrees with the
 team's mental model:
@@ -153,7 +237,7 @@ base
 Use `--format json` with `show`, `validate`, or `graph` when another tool needs to consume the
 result. JSON output includes a schema version so it can be treated as an automation contract.
 
-## Worked example 2: build a dependent image locally
+### Worked example 2: build a dependent image locally
 
 A developer asks to build `curl`. Its parent is included automatically:
 
@@ -176,7 +260,7 @@ platform images build curl --no-deps
 Use `--no-deps` deliberately: it trusts the existing
 `localhost/platform-images/base:dev` rather than recreating it.
 
-## Worked example 3: a leaf image changes
+### Worked example 3: a leaf image changes
 
 Suppose a merge request edits only `images/curl/Dockerfile`:
 
@@ -213,7 +297,7 @@ export CI_MERGE_REQUEST_IID=42
 platform images plan --base "$BASE_SHA" --head HEAD --format json
 ```
 
-## Worked example 4: a base image changes
+### Worked example 4: a base image changes
 
 Now suppose the change is under `images/base/`:
 
@@ -254,7 +338,7 @@ export CI_COMMIT_SHA=0123456789abcdef0123456789abcdef01234567
 platform images plan --ci --all
 ```
 
-## Worked example 5: generate the GitLab jobs
+### Worked example 5: generate the GitLab jobs
 
 The parent pipeline calculates once, persists the JSON plan, and renders a child pipeline from that
 same artifact:
@@ -291,7 +375,7 @@ image_curl:
 The `needs` edge is derived from the Dockerfile. Because every job pushes its unique output before
 completion, `image_curl` can run on a different GitLab runner with no shared Podman image store.
 
-## Worked example 6: merge request versus default branch
+### Worked example 6: merge request versus default branch
 
 Merge requests create isolated images and never update the stable alias:
 
@@ -321,7 +405,7 @@ promote_main:
 If either build fails, promotion never starts. Consumers therefore do not observe a half-promoted
 set where `base:main` is new but `curl:main` is old.
 
-## Worked example 7: no image-related change
+### Worked example 7: no image-related change
 
 A documentation change outside configured global inputs affects no target:
 
@@ -344,7 +428,7 @@ no_image_changes:
 The parent pipeline remains structurally identical whether zero, one, or hundreds of images are
 selected.
 
-## Worked example 8: a shared build input changes
+### Worked example 8: a shared build input changes
 
 Some files affect every image even though they do not live beneath `images/`. Add those paths to
 `changes.global_inputs`:
@@ -375,7 +459,7 @@ uv.lock
 These mandatory patterns cannot be configured away, because a controller or pipeline change must
 re-evaluate the entire image set safely.
 
-## Worked example 9: add another local image
+### Worked example 9: add another local image
 
 Add a direct directory; do not add a corresponding GitLab job:
 
@@ -416,7 +500,7 @@ RUN --mount=from=curl,target=/tools,ro cp /tools/usr/bin/curl /usr/local/bin/cur
 Local references in `COPY`/`ADD --from` and `RUN --mount=from` participate in the same graph.
 Numeric and named stages inside one Dockerfile remain Dockerfile stages rather than image targets.
 
-## Worked example 10: keep unrelated images independent
+### Worked example 10: keep unrelated images independent
 
 Not every image needs to belong to the same chain. Add an independent utility image:
 
@@ -451,7 +535,7 @@ The selection behavior is now:
 This is the central reason to calculate a graph instead of maintaining a single “images changed”
 switch: independent images stay cheap, while dependent images stay correct.
 
-## Worked example 11: bootstrap and recovery
+### Worked example 11: bootstrap and recovery
 
 On the first default-branch pipeline GitLab supplies an all-zero `CI_COMMIT_BEFORE_SHA`. There is no
 valid previous commit to compare, so the controller deliberately builds the complete graph.
@@ -467,7 +551,7 @@ Use `--ci --all` after introducing the tool, creating a new registry namespace, 
 invalidating every stable image. Normal pipelines should use `--ci` so Git determines the minimal
 affected set.
 
-## Worked example 12: catch dependency mistakes before CI spends money
+### Worked example 12: catch dependency mistakes before CI spends money
 
 If `curl` accidentally says `FROM bsae`, validation does not silently pull an unrelated public
 image:
