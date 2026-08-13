@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.4.0 (2026-08-13)
+
+### Documentation
+
+- Point installation at verified release
+  ([`688a9bf`](https://github.com/davehewy/platform-images/commit/688a9bfc2dcb1f57e3ee92eccbd4eb8cbb4297cd))
+
+### Features
+
+- Generate GitHub image workflows
+  ([`031d003`](https://github.com/davehewy/platform-images/commit/031d003e9f97e474de2bd89d59e074707cedf356))
+
+
 ## v0.3.2 (2026-08-13)
 
 ### Bug Fixes
