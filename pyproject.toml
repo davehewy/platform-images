@@ -1,13 +1,17 @@
 [build-system]
-requires = ["hatchling>=1.26"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
 name = "platform-images"
 version = "0.1.0"
-description = "Convention-driven container image controller"
+description = "Dependency-aware orchestration for container-image monorepos and dynamic GitLab pipelines"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
+authors = [{ name = "David Heward", email = "dave@bytewire.co.uk" }]
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["containers", "dependency-graph", "devops", "gitlab-ci", "monorepo", "podman"]
 dependencies = ["PyYAML>=6.0.2"]
 
 [project.optional-dependencies]
@@ -21,6 +25,11 @@ dev = [
 
 [project.scripts]
 platform = "platform_images.cli:main"
+
+[project.urls]
+Repository = "https://github.com/davehewy/platform-images"
+Issues = "https://github.com/davehewy/platform-images/issues"
+Releases = "https://github.com/davehewy/platform-images/releases"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/platform_images"]

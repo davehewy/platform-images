@@ -1,5 +1,10 @@
 # Platform Images
 
+[![CI](https://github.com/davehewy/platform-images/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/davehewy/platform-images/actions/workflows/ci.yml)
+[![Release](https://github.com/davehewy/platform-images/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/davehewy/platform-images/actions/workflows/release.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white)](pyproject.toml)
+
 `platform-images` is a lightweight way to keep multiple container images in one repository. The
 images may be completely independent, share a common parent, or form deeper dependency chains. When
 something changes in an image directory or in shared build configuration, the tool selects the
@@ -654,3 +659,7 @@ The Podman integration test builds and runs the `base -> curl` topology. It is s
 Podman is absent or unavailable. GitHub CI requires Podman, repeats the locked quality suite, and
 builds the wheel and source distribution. Conventional Commit messages drive Python Semantic
 Release after `main` passes CI.
+
+## License
+
+Released under the [MIT License](LICENSE). Copyright (c) 2026 David Heward.
