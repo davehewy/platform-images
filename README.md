@@ -96,7 +96,7 @@ Install a specific version or choose another destination with environment variab
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/davehewy/platform-images/main/scripts/install.sh |
-  PLATFORM_IMAGES_VERSION=0.3.2 PLATFORM_IMAGES_INSTALL_DIR=/usr/local/bin sh
+  PLATFORM_IMAGES_VERSION=0.4.0 PLATFORM_IMAGES_INSTALL_DIR=/usr/local/bin sh
 ```
 
 On Windows, run this in PowerShell. It verifies the Windows archive, installs `platform.exe` below
@@ -136,7 +136,7 @@ If Python 3.12 is already part of the team's toolchain, `uv` can install an isol
 
 ```bash
 uv tool install --python 3.12 \
-  "git+https://github.com/davehewy/platform-images.git@v0.3.2"
+  "git+https://github.com/davehewy/platform-images.git@v0.4.0"
 ```
 
 The universal `platform_images-<version>-py3-none-any.whl` and conventional Python source
