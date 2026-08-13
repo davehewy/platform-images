@@ -2,6 +2,24 @@
 
 <!-- version list -->
 
+## v0.5.0 (2026-08-13)
+
+### Bug Fixes
+
+- **ci**: Connect nerdctl to integration containerd
+  ([`1232498`](https://github.com/davehewy/platform-images/commit/123249816f14d933955170d3d3414efa68926af6))
+
+### Documentation
+
+- Point installation at v0.4.0
+  ([`56365fa`](https://github.com/davehewy/platform-images/commit/56365fad96bc7a9536579923d726c68c5816098b))
+
+### Features
+
+- Support configurable container backends
+  ([`c4ba95e`](https://github.com/davehewy/platform-images/commit/c4ba95e9815bf002ad4f1dab8d749f6fe4c00df2))
+
+
 ## v0.4.0 (2026-08-13)
 
 ### Documentation
