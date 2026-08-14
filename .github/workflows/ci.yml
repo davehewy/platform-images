@@ -94,11 +94,11 @@ jobs:
           archive="nerdctl-full-${NERDCTL_VERSION}-linux-amd64.tar.gz"
           curl -fsSLO "https://github.com/containerd/nerdctl/releases/download/v${NERDCTL_VERSION}/${archive}"
           printf '%s  %s\n' "$NERDCTL_FULL_LINUX_AMD64_SHA256" "$archive" | sha256sum --check
-          sudo tar -xzf "${archive}" -C /usr/local
-          sudo mv /usr/local/bin/nerdctl /usr/local/bin/nerdctl.real
+          sudo install -d /opt/platform-images-nerdctl
+          sudo tar -xzf "${archive}" -C /opt/platform-images-nerdctl
           printf '%s\n' \
             '#!/bin/sh' \
-            'exec sudo --preserve-env=CONTAINERD_ADDRESS,BUILDKIT_HOST /usr/local/bin/nerdctl.real "$@"' |
+            'exec sudo --preserve-env=CONTAINERD_ADDRESS,BUILDKIT_HOST env PATH=/opt/platform-images-nerdctl/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin /opt/platform-images-nerdctl/bin/nerdctl "$@"' |
             sudo tee /usr/local/bin/nerdctl >/dev/null
           sudo chmod 0755 /usr/local/bin/nerdctl
           sudo install -d \
@@ -109,14 +109,16 @@ jobs:
           sudo systemd-run \
             --unit=platform-images-containerd \
             --property=Restart=on-failure \
-            -- /usr/local/bin/containerd \
+            --setenv=PATH=/opt/platform-images-nerdctl/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin \
+            -- /opt/platform-images-nerdctl/bin/containerd \
             --address "$CONTAINERD_ADDRESS" \
             --state /run/platform-images-containerd/state \
             --root /var/lib/platform-images-containerd
           sudo systemd-run \
             --unit=platform-images-buildkit \
             --property=Restart=on-failure \
-            -- /usr/local/bin/buildkitd \
+            --setenv=PATH=/opt/platform-images-nerdctl/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin \
+            -- /opt/platform-images-nerdctl/bin/buildkitd \
             --addr "$BUILDKIT_HOST" \
             --root /var/lib/platform-images-buildkit
           for attempt in $(seq 1 30); do
@@ -133,8 +135,8 @@ jobs:
           sudo chmod a+rw "$CONTAINERD_ADDRESS" "${BUILDKIT_HOST#unix://}"
           nerdctl version
           nerdctl info
-          buildctl --version
-          buildctl debug workers
+          /opt/platform-images-nerdctl/bin/buildctl --version
+          /opt/platform-images-nerdctl/bin/buildctl debug workers
 
       - name: Exercise real base-to-dependent build
         run: uv run --locked --extra dev pytest -m integration -q

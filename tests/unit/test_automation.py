@@ -65,6 +65,10 @@ def test_github_actions_are_immutable_and_ci_gates_release() -> None:
     assert "buildah info" in integration_script
     assert "nerdctl-full-" in integration_script
     assert "--preserve-env=CONTAINERD_ADDRESS,BUILDKIT_HOST" in integration_script
+    assert 'tar -xzf "${archive}" -C /opt/platform-images-nerdctl' in integration_script
+    assert 'tar -xzf "${archive}" -C /usr/local' not in integration_script
+    assert "/opt/platform-images-nerdctl/bin/containerd" in integration_script
+    assert "/opt/platform-images-nerdctl/bin/buildkitd" in integration_script
     assert (
         len(
             next(
