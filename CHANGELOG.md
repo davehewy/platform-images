@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.10.0 (2026-08-14)
+
+### Features
+
+- **graph**: Render a visibly connected terminal tree
+  ([`f26c957`](https://github.com/davehewy/platform-images/commit/f26c95736fe91ae97f913b78df6e6ec54bb41253))
+
+
 ## v0.9.3 (2026-08-14)
 
 ### Bug Fixes
