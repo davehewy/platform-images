@@ -250,6 +250,7 @@ def test_release_and_commit_conventions_derive_versions_from_git_tags() -> None:
     assert "version_toml" not in semantic_release
     assert "version_variables" not in semantic_release
     assert semantic_release["build_command"] == "python scripts/build-release.py"
+    assert semantic_release["assets"] == ["uv.lock"]
     assert semantic_release["publish"]["upload_to_vcs_release"] is True
 
 

@@ -67,6 +67,7 @@ allow_zero_version = true
 major_on_zero = false
 tag_format = "v{version}"
 build_command = "python scripts/build-release.py"
+assets = ["uv.lock"]
 
 [tool.semantic_release.branches.main]
 match = "main"
