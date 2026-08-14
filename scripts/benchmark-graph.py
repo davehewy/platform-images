@@ -50,7 +50,7 @@ def measure(operation: Callable[[], object], iterations: int) -> dict[str, float
 def write_repository(root: Path, image_count: int) -> dict[str, str]:
     roots_toml = ", ".join(json.dumps(value) for value in DISCOVERY_ROOTS)
     (root / "platform-images.toml").write_text(
-        f'''\
+        f"""\
 [registry]
 namespace = "platform-images"
 registry_environment_variable = "PLATFORM_IMAGES_REGISTRY"
@@ -68,7 +68,7 @@ allowed_short_external_images = ["alpine"]
 
 [changes]
 global_inputs = []
-''',
+""",
         encoding="utf-8",
     )
     locations: dict[str, str] = {}
