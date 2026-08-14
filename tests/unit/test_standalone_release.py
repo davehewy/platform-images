@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import tarfile
 import zipfile
 from pathlib import Path
@@ -99,3 +100,37 @@ def test_windows_archive_contains_exe_documentation_and_license(tmp_path: Path) 
     with zipfile.ZipFile(output) as archive:
         assert archive.namelist() == ["platform.exe", "LICENSE", "README.md"]
         assert archive.read("platform.exe") == b"executable"
+
+
+def test_standalone_version_smoke_check_accepts_the_release_version(
+    tmp_path: Path, monkeypatch
+) -> None:
+    builder = load_builder()
+    calls: list[tuple[list[Path | str], Path]] = []
+
+    def run(command, *, cwd, **kwargs):
+        calls.append((command, cwd))
+        return subprocess.CompletedProcess(command, 0, stdout="platform-images 0.9.0\n")
+
+    monkeypatch.setattr(builder.subprocess, "run", run)
+    binary = tmp_path / "platform"
+
+    builder._verify_version(binary, tmp_path, "0.9.0")
+
+    assert calls == [([binary, "version"], tmp_path)]
+
+
+def test_standalone_version_smoke_check_rejects_a_mismatched_binary(
+    tmp_path: Path, monkeypatch
+) -> None:
+    builder = load_builder()
+    monkeypatch.setattr(
+        builder.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0, stdout="platform-images 0.8.0\n"
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="reported version 'platform-images 0.8.0'"):
+        builder._verify_version(tmp_path / "platform", tmp_path, "0.9.0")

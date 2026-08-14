@@ -115,7 +115,7 @@ Install a specific version or choose another destination with environment variab
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/davehewy/platform-images/main/scripts/install.sh |
-  PLATFORM_IMAGES_VERSION=0.9.0 PLATFORM_IMAGES_INSTALL_DIR=/usr/local/bin sh
+  PLATFORM_IMAGES_VERSION=0.9.1 PLATFORM_IMAGES_INSTALL_DIR=/usr/local/bin sh
 ```
 
 On Windows, run this in PowerShell. It verifies the Windows archive, installs `platform.exe` below
@@ -132,12 +132,12 @@ Each [GitHub release](https://github.com/davehewy/platform-images/releases) prov
 
 | System | Architecture | Release asset |
 | --- | --- | --- |
-| GNU/Linux | AMD64 / x86_64 | `platform-images-v0.9.0-linux-amd64.tar.gz` |
-| GNU/Linux | ARM64 / AArch64 | `platform-images-v0.9.0-linux-arm64.tar.gz` |
-| macOS / Darwin | Intel AMD64 | `platform-images-v0.9.0-darwin-amd64.tar.gz` |
-| macOS / Darwin | Apple Silicon ARM64 | `platform-images-v0.9.0-darwin-arm64.tar.gz` |
-| Windows | AMD64 / x86_64 | `platform-images-v0.9.0-windows-amd64.zip` |
-| Windows | ARM64 | `platform-images-v0.9.0-windows-arm64.zip` |
+| GNU/Linux | AMD64 / x86_64 | `platform-images-v0.9.1-linux-amd64.tar.gz` |
+| GNU/Linux | ARM64 / AArch64 | `platform-images-v0.9.1-linux-arm64.tar.gz` |
+| macOS / Darwin | Intel AMD64 | `platform-images-v0.9.1-darwin-amd64.tar.gz` |
+| macOS / Darwin | Apple Silicon ARM64 | `platform-images-v0.9.1-darwin-arm64.tar.gz` |
+| Windows | AMD64 / x86_64 | `platform-images-v0.9.1-windows-amd64.zip` |
+| Windows | ARM64 | `platform-images-v0.9.1-windows-arm64.zip` |
 
 Every archive name contains its exact release version, so downloads from different releases remain
 self-identifying when stored together. Each archive contains the native `platform` executable,
@@ -188,7 +188,7 @@ Confirm which release is installed:
 
 ```bash
 platform version
-# platform-images 0.9.0
+# platform-images 0.9.1
 ```
 
 In a repository that already contains image target directories but no configuration, initialize it

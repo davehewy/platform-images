@@ -73,6 +73,22 @@ def _archive(binary: Path, output: Path, root: Path, system: str) -> None:
                     bundle.add(staging / name, arcname=name)
 
 
+def _verify_version(binary: Path, root: Path, expected_version: str) -> None:
+    reported_version = subprocess.run(
+        [binary, "version"],
+        cwd=root,
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout.strip()
+    expected_output = f"platform-images {expected_version}"
+    if reported_version != expected_output:
+        raise RuntimeError(
+            "standalone executable reported version "
+            f"{reported_version!r}; expected {expected_output!r}"
+        )
+
+
 def build(version: str, expected_system: str, expected_architecture: str, output_dir: Path) -> Path:
     root = Path(__file__).resolve().parents[1]
     if version != __version__:
@@ -117,18 +133,7 @@ def build(version: str, expected_system: str, expected_architecture: str, output
     if not binary.is_file():
         raise RuntimeError(f"PyInstaller did not create the expected executable: {binary}")
 
-    version = subprocess.run(
-        [binary, "version"],
-        cwd=root,
-        check=True,
-        text=True,
-        capture_output=True,
-    ).stdout.strip()
-    expected_version = f"platform-images {__version__}"
-    if version != expected_version:
-        raise RuntimeError(
-            f"standalone executable reported version {version!r}; expected {expected_version!r}"
-        )
+    _verify_version(binary, root, __version__)
 
     environment = dict(os.environ)
     environment["PLATFORM_IMAGES_ROOT"] = str(root)
