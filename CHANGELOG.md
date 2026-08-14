@@ -2,6 +2,29 @@
 
 <!-- version list -->
 
+## v0.6.0 (2026-08-14)
+
+### Bug Fixes
+
+- **ci**: Isolate nerdctl runtime binaries
+  ([`b694557`](https://github.com/davehewy/platform-images/commit/b69455799f578416f47f2734d5c3305abe543281))
+
+### Code Style
+
+- Format benchmark fixture
+  ([`b184368`](https://github.com/davehewy/platform-images/commit/b184368d6417f4ceb7eca89b47de52434330766c))
+
+### Documentation
+
+- Point installation at v0.5.0
+  ([`fb530e5`](https://github.com/davehewy/platform-images/commit/fb530e582858c78577de90ecee88ebfec86abb3b))
+
+### Features
+
+- Support multiple discovery roots
+  ([`0735e90`](https://github.com/davehewy/platform-images/commit/0735e909dbf5c69b41503fdb6a977ba11c45f809))
+
+
 ## v0.5.0 (2026-08-13)
 
 ### Bug Fixes
