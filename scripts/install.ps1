@@ -26,15 +26,31 @@ $architecture = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSA
     }
 }
 
-$asset = "platform-images-windows-$architecture.zip"
 if ($env:PLATFORM_IMAGES_RELEASE_URL) {
+    if ($Version -eq "latest") {
+        throw "platform-images: PLATFORM_IMAGES_VERSION is required with PLATFORM_IMAGES_RELEASE_URL"
+    }
+    $releaseVersion = if ($Version.StartsWith("v")) { $Version.Substring(1) } else { $Version }
     $releaseUrl = $env:PLATFORM_IMAGES_RELEASE_URL.TrimEnd("/")
 } elseif ($Version -eq "latest") {
-    $releaseUrl = "https://github.com/$repository/releases/latest/download"
+    $latestRelease = Invoke-RestMethod -Uri "https://api.github.com/repos/$repository/releases/latest"
+    $tag = [string] $latestRelease.tag_name
+    if (-not $tag.StartsWith("v")) {
+        throw "platform-images: unable to resolve the latest release version"
+    }
+    $releaseVersion = $tag.Substring(1)
+    $releaseUrl = "https://github.com/$repository/releases/download/$tag"
 } else {
-    $tag = if ($Version.StartsWith("v")) { $Version } else { "v$Version" }
+    $releaseVersion = if ($Version.StartsWith("v")) { $Version.Substring(1) } else { $Version }
+    $tag = "v$releaseVersion"
     $releaseUrl = "https://github.com/$repository/releases/download/$tag"
 }
+if ($releaseVersion -notmatch '^[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*$') {
+    throw "platform-images: invalid release version: $releaseVersion"
+}
+
+$asset = "platform-images-v$releaseVersion-windows-$architecture.zip"
+$legacyAsset = "platform-images-windows-$architecture.zip"
 
 $temporaryDirectory = Join-Path ([System.IO.Path]::GetTempPath()) (
     "platform-images-install-" + [System.Guid]::NewGuid().ToString("N")
@@ -44,7 +60,13 @@ New-Item -ItemType Directory -Path $temporaryDirectory | Out-Null
 try {
     $archive = Join-Path $temporaryDirectory $asset
     $checksums = Join-Path $temporaryDirectory "SHA256SUMS"
-    Invoke-WebRequest -UseBasicParsing -Uri "$releaseUrl/$asset" -OutFile $archive
+    try {
+        Invoke-WebRequest -UseBasicParsing -Uri "$releaseUrl/$asset" -OutFile $archive
+    } catch {
+        $asset = $legacyAsset
+        $archive = Join-Path $temporaryDirectory $asset
+        Invoke-WebRequest -UseBasicParsing -Uri "$releaseUrl/$asset" -OutFile $archive
+    }
     Invoke-WebRequest -UseBasicParsing -Uri "$releaseUrl/SHA256SUMS" -OutFile $checksums
 
     $expected = $null
@@ -74,7 +96,7 @@ try {
         [System.Environment]::SetEnvironmentVariable("Path", $newPath, "User")
         Write-Host "Added $InstallDir to your user PATH; open a new terminal to use it."
     }
-    Write-Host "Installed platform-images $Version to $(Join-Path $InstallDir 'platform.exe')"
+    Write-Host "Installed platform-images v$releaseVersion to $(Join-Path $InstallDir 'platform.exe')"
 } finally {
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $temporaryDirectory
 }

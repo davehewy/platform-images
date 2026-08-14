@@ -125,8 +125,19 @@ def test_release_workflow_builds_all_supported_standalone_platforms() -> None:
         if step["name"] == "Build and smoke-test standalone archive"
     )
     assert "steps.python.outputs.python-path" in build_step["run"]
+    assert '--version "${{ needs.release.outputs.version }}"' in build_step["run"]
+    retain_step = next(
+        step for step in standalone["steps"] if step["name"] == "Retain standalone archive"
+    )
+    assert retain_step["with"]["name"] == (
+        "standalone-${{ needs.release.outputs.version }}-${{ matrix.platform }}"
+    )
     assert publish["needs"] == ["release", "standalone"]
     assert publish["permissions"] == {"contents": "write"}
+    download_step = next(
+        step for step in publish["steps"] if step["name"] == "Download standalone archives"
+    )
+    assert download_step["with"]["pattern"] == ("standalone-${{ needs.release.outputs.version }}-*")
     upload_step = next(
         step
         for step in publish["steps"]
@@ -139,7 +150,7 @@ def test_release_workflow_builds_all_supported_standalone_platforms() -> None:
     }
 
 
-def test_standalone_archive_names_are_stable_for_latest_downloads() -> None:
+def test_standalone_release_matrix_has_stable_platform_identifiers() -> None:
     release = load_workflow("release.yml")
     entries = release["jobs"]["standalone"]["strategy"]["matrix"]["include"]  # type: ignore[index]
     assert {entry["platform"] for entry in entries} == {
@@ -156,13 +167,19 @@ def test_installer_is_executable_and_references_every_release_asset() -> None:
     installer = ROOT / "scripts" / "install.sh"
     assert installer.stat().st_mode & 0o111
     contents = installer.read_text(encoding="utf-8")
-    assert "platform-images-${operating_system}-${architecture}.tar.gz" in contents
+    assert (
+        "platform-images-v${release_version}-${operating_system}-${architecture}.tar.gz" in contents
+    )
+    assert "releases/latest" in contents
+    assert "url_effective" in contents
     assert "SHA256SUMS" in contents
     assert "linux" in contents
     assert "darwin" in contents
     windows_installer = ROOT / "scripts" / "install.ps1"
     windows_contents = windows_installer.read_text(encoding="utf-8")
-    assert "platform-images-windows-$architecture.zip" in windows_contents
+    assert "platform-images-v$releaseVersion-windows-$architecture.zip" in windows_contents
+    assert "releases/latest" in windows_contents
+    assert "tag_name" in windows_contents
     assert "SHA256SUMS" in windows_contents
     assert "Get-FileHash" in windows_contents
 

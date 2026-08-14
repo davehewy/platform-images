@@ -25,18 +25,31 @@ def load_builder() -> ModuleType:
 @pytest.mark.parametrize(
     ("system", "architecture", "expected"),
     [
-        ("linux", "amd64", "platform-images-linux-amd64.tar.gz"),
-        ("linux", "arm64", "platform-images-linux-arm64.tar.gz"),
-        ("darwin", "amd64", "platform-images-darwin-amd64.tar.gz"),
-        ("darwin", "arm64", "platform-images-darwin-arm64.tar.gz"),
-        ("windows", "amd64", "platform-images-windows-amd64.zip"),
-        ("windows", "arm64", "platform-images-windows-arm64.zip"),
+        ("linux", "amd64", "platform-images-v0.7.0-linux-amd64.tar.gz"),
+        ("linux", "arm64", "platform-images-v0.7.0-linux-arm64.tar.gz"),
+        ("darwin", "amd64", "platform-images-v0.7.0-darwin-amd64.tar.gz"),
+        ("darwin", "arm64", "platform-images-v0.7.0-darwin-arm64.tar.gz"),
+        ("windows", "amd64", "platform-images-v0.7.0-windows-amd64.zip"),
+        ("windows", "arm64", "platform-images-v0.7.0-windows-arm64.zip"),
     ],
 )
 def test_archive_names_match_release_contract(
     system: str, architecture: str, expected: str
 ) -> None:
-    assert load_builder().archive_name(system, architecture) == expected
+    assert load_builder().archive_name("0.7.0", system, architecture) == expected
+
+
+def test_archive_name_accepts_tag_form_without_doubling_version_prefix() -> None:
+    assert (
+        load_builder().archive_name("v0.7.0", "linux", "amd64")
+        == "platform-images-v0.7.0-linux-amd64.tar.gz"
+    )
+
+
+@pytest.mark.parametrize("version", ("", "../0.7.0", "0.7.0/escape"))
+def test_archive_name_rejects_unsafe_versions(version: str) -> None:
+    with pytest.raises(ValueError, match="invalid standalone release version"):
+        load_builder().archive_name(version, "linux", "amd64")
 
 
 @pytest.mark.parametrize(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -25,6 +26,7 @@ WINDOWS_INTERPRETER_ARCHITECTURES = {
     "win-amd64": "amd64",
     "win-arm64": "arm64",
 }
+RELEASE_VERSION_RE = re.compile(r"^[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*$")
 
 
 def native_platform() -> tuple[str, str]:
@@ -40,11 +42,14 @@ def native_platform() -> tuple[str, str]:
     return system, architecture
 
 
-def archive_name(system: str, architecture: str) -> str:
+def archive_name(version: str, system: str, architecture: str) -> str:
     if system not in SYSTEMS.values() or architecture not in {"amd64", "arm64"}:
         raise ValueError(f"unsupported standalone target: {system}-{architecture}")
+    normalized_version = version.removeprefix("v")
+    if not RELEASE_VERSION_RE.fullmatch(normalized_version):
+        raise ValueError(f"invalid standalone release version: {version!r}")
     suffix = ".zip" if system == "windows" else ".tar.gz"
-    return f"platform-images-{system}-{architecture}{suffix}"
+    return f"platform-images-v{normalized_version}-{system}-{architecture}{suffix}"
 
 
 def _archive(binary: Path, output: Path, root: Path, system: str) -> None:
@@ -118,7 +123,7 @@ def build(version: str, expected_system: str, expected_architecture: str, output
     subprocess.run([binary, "images", "graph"], cwd=root, env=environment, check=True)
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    output = output_dir / archive_name(expected_system, expected_architecture)
+    output = output_dir / archive_name(version, expected_system, expected_architecture)
     _archive(binary, output, root, expected_system)
     print(f"Built platform-images {version}: {output}")
     return output

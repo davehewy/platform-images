@@ -104,7 +104,7 @@ Install a specific version or choose another destination with environment variab
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/davehewy/platform-images/main/scripts/install.sh |
-  PLATFORM_IMAGES_VERSION=0.6.0 PLATFORM_IMAGES_INSTALL_DIR=/usr/local/bin sh
+  PLATFORM_IMAGES_VERSION=0.7.0 PLATFORM_IMAGES_INSTALL_DIR=/usr/local/bin sh
 ```
 
 On Windows, run this in PowerShell. It verifies the Windows archive, installs `platform.exe` below
@@ -121,15 +121,17 @@ Each [GitHub release](https://github.com/davehewy/platform-images/releases) prov
 
 | System | Architecture | Release asset |
 | --- | --- | --- |
-| GNU/Linux | AMD64 / x86_64 | `platform-images-linux-amd64.tar.gz` |
-| GNU/Linux | ARM64 / AArch64 | `platform-images-linux-arm64.tar.gz` |
-| macOS / Darwin | Intel AMD64 | `platform-images-darwin-amd64.tar.gz` |
-| macOS / Darwin | Apple Silicon ARM64 | `platform-images-darwin-arm64.tar.gz` |
-| Windows | AMD64 / x86_64 | `platform-images-windows-amd64.zip` |
-| Windows | ARM64 | `platform-images-windows-arm64.zip` |
+| GNU/Linux | AMD64 / x86_64 | `platform-images-v0.7.0-linux-amd64.tar.gz` |
+| GNU/Linux | ARM64 / AArch64 | `platform-images-v0.7.0-linux-arm64.tar.gz` |
+| macOS / Darwin | Intel AMD64 | `platform-images-v0.7.0-darwin-amd64.tar.gz` |
+| macOS / Darwin | Apple Silicon ARM64 | `platform-images-v0.7.0-darwin-arm64.tar.gz` |
+| Windows | AMD64 / x86_64 | `platform-images-v0.7.0-windows-amd64.zip` |
+| Windows | ARM64 | `platform-images-v0.7.0-windows-arm64.zip` |
 
-Every archive contains the native `platform` executable, README, and MIT license. `SHA256SUMS`
-covers all six archives. The Linux executables are built on Ubuntu 22.04 and target modern
+Every archive name contains its exact release version, so downloads from different releases remain
+self-identifying when stored together. Each archive contains the native `platform` executable,
+README, and MIT license. `SHA256SUMS` covers all six archives. The Linux executables are built on
+Ubuntu 22.04 and target modern
 glibc-based 64-bit distributions. The macOS executables are built natively on Intel and Apple
 Silicon runners. Windows executables are built natively for x86_64 and ARM64; GitHub currently
 classifies its hosted Windows ARM64 runner as public preview.
@@ -145,7 +147,7 @@ If Python 3.12 is already part of the team's toolchain, `uv` can install an isol
 
 ```bash
 uv tool install --python 3.12 \
-  "git+https://github.com/davehewy/platform-images.git@v0.6.0"
+  "git+https://github.com/davehewy/platform-images.git@v0.7.0"
 ```
 
 The universal `platform_images-<version>-py3-none-any.whl` and conventional Python source
