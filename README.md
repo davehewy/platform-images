@@ -8,6 +8,9 @@
 [![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white)](pyproject.toml)
 [![Buy me a coffee](https://img.shields.io/badge/Buy_me_a_coffee-support-FFDD00.svg?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/davehewy)
 
+> **Sick of manually orchestrating container-image builds in GitLab pipeline or GitHub Actions
+> workflow files? This tool is for you.**
+
 `platform-images` is a lightweight way to keep multiple container images in one repository. The
 images may be completely independent, share a common parent, or form deeper dependency chains. When
 something changes in an image directory or in shared build configuration, the tool selects the
@@ -968,19 +971,29 @@ See [architecture](docs/architecture.md), [adding an image](docs/adding-an-image
 
 ## Performance and scaling
 
-The repository includes a reproducible synthetic benchmark with 100 images spread across three
-discovery roots and 292 build-time dependency edges:
+**The graph controller is fast.** Even for a repository with 1,000 images, it can map a change
+through the complete dependency graph in under 1 ms and plan the deepest 1,000-image chain in about
+46 ms on the development machine used for the reference run.
+
+The repository includes a reproducible benchmark that creates a synthetic multi-parent DAG spread
+across three discovery roots. These are median results from 14 August 2026 using Python 3.12:
+
+| Images | Dependency edges | Runs | Discover, parse, and validate | Topological order | Plan deepest leaf | Root change to affected set |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 100 | 292 | 25 | 23.416 ms | 0.042 ms | 4.341 ms | 0.099 ms |
+| 1,000 | 2,992 | 10 | 233.790 ms | 0.476 ms | 45.671 ms | 0.956 ms |
+
+Run `scripts/benchmark-graph.py` to see how fast it is on your laptop or CI runner:
 
 ```bash
 uv run --locked python scripts/benchmark-graph.py --images 100 --iterations 25
 ```
 
-Use `--json` to capture results, or `--max-leaf-plan-ms <milliseconds>` to make a performance
-budget enforceable. A reference run on the development machine produced approximately 23 ms for
-full discovery, Dockerfile parsing, validation, and graph construction; 0.07 ms for a complete
-topological order; 4.5 ms for planning the deepest leaf and all 99 upstream images; and 0.10 ms for
-mapping a root change to all 100 affected images. These are comparative figures, not hardware
-guarantees; run the script on the intended CI runner when setting a local budget.
+Change `--images` to test a larger repository. Use `--json` to capture comparable results, or
+`--max-leaf-plan-ms <milliseconds>` to enforce a performance budget. The figures above measure the
+controller—filesystem discovery, Dockerfile parsing, graph construction, change propagation, and
+planning—not container builds or registry transfers. They are evidence from one machine rather
+than hardware guarantees, so benchmark the intended CI runner before choosing a local threshold.
 
 The implementation avoids work that grows quadratically with the number of images:
 
