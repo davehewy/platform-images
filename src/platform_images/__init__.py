@@ -1,3 +1,3 @@
 """Convention-driven container image controller."""
 
-__version__ = "0.9.1"
+__version__ = "0.9.2"

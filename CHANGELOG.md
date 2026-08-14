@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.9.2 (2026-08-14)
+
+### Bug Fixes
+
+- **discovery**: Support nested discovery roots
+  ([`d199669`](https://github.com/davehewy/platform-images/commit/d199669c056da35569273d125b6277537e9696a1))
+
+
 ## v0.9.1 (2026-08-14)
 
 ### Bug Fixes
