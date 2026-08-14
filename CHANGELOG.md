@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.9.3 (2026-08-14)
+
+### Bug Fixes
+
+- **discovery**: Ignore directories without build files
+  ([`a82ea13`](https://github.com/davehewy/platform-images/commit/a82ea13e0d50a80c2d19d86b6811aca5023e0493))
+
+
 ## v0.9.2 (2026-08-14)
 
 ### Bug Fixes
