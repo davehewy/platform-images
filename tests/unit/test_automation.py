@@ -47,6 +47,7 @@ def test_github_actions_are_immutable_and_ci_gates_release() -> None:
     workflow_run = release_events["workflow_run"]
     assert isinstance(workflow_run, dict)
     assert workflow_run["workflows"] == ["CI"]
+    assert "workflow_dispatch" not in release_events
 
     release_job = release["jobs"]["release"]  # type: ignore[index]
     assert release_job["permissions"] == {"contents": "write"}  # type: ignore[index]
@@ -54,6 +55,12 @@ def test_github_actions_are_immutable_and_ci_gates_release() -> None:
         "workflow_run.head_sha" in str(step.get("env", {}))
         for step in release_job["steps"]  # type: ignore[index]
     )
+    semantic_release = next(
+        step
+        for step in release_job["steps"]  # type: ignore[index]
+        if str(step.get("uses", "")).startswith("python-semantic-release/python-semantic-release@")
+    )
+    assert semantic_release["with"]["commit"] == "false"
 
     integration = ci["jobs"]["container-engine-integration"]  # type: ignore[index]
     integration_script = "\n".join(
@@ -225,17 +232,23 @@ def test_issue_forms_and_support_links_are_configured() -> None:
     assert funding["custom"] == ["https://buymeacoffee.com/davehewy"]
 
 
-def test_release_and_commit_conventions_share_project_version() -> None:
+def test_release_and_commit_conventions_derive_versions_from_git_tags() -> None:
     with (ROOT / "pyproject.toml").open("rb") as handle:
         project = tomllib.load(handle)
 
     commitizen = project["tool"]["commitizen"]
     semantic_release = project["tool"]["semantic_release"]
+    assert project["project"]["dynamic"] == ["version"]
+    assert "version" not in project["project"]
+    assert project["tool"]["hatch"]["version"]["source"] == "vcs"
+    assert project["tool"]["hatch"]["version"]["fallback-version"] == "0+unknown"
+    assert project["tool"]["hatch"]["build"]["hooks"]["vcs"]["version-file"] == (
+        "src/platform_images/_version.py"
+    )
     assert commitizen["name"] == "cz_conventional_commits"
-    assert commitizen["version_provider"] == "pep621"
-    assert semantic_release["version_toml"] == ["pyproject.toml:project.version"]
-    assert semantic_release["version_variables"] == ["src/platform_images/__init__.py:__version__"]
-    assert semantic_release["assets"] == ["uv.lock"]
+    assert commitizen["version_provider"] == "scm"
+    assert "version_toml" not in semantic_release
+    assert "version_variables" not in semantic_release
     assert semantic_release["build_command"] == "python scripts/build-release.py"
     assert semantic_release["publish"]["upload_to_vcs_release"] is True
 

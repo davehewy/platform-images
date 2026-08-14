@@ -144,6 +144,10 @@ self-identifying when stored together. Each archive contains the native `platfor
 README, and MIT license. `SHA256SUMS` covers every archive, Python distribution, lockfile, and the
 versioned SPDX JSON software bill of materials. GitHub publishes signed build provenance for every
 downloadable payload and binds the SPDX SBOM to every archive, Python distribution, and lockfile.
+The release tag is placed on the exact `main` commit that passed both CI gates; package and CLI
+versions are derived from that immutable tag. Semantic-release never pushes an extra generated
+version-bump commit to the protected branch and therefore needs neither a personal access token nor
+a branch-protection bypass.
 Verify a downloaded executable archive independently with:
 
 ```bash

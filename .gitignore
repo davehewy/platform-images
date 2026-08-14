@@ -7,3 +7,4 @@ dist/
 build/
 image-plan.json
 generated-images.yml
+src/platform_images/_version.py
