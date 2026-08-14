@@ -37,8 +37,8 @@ jobs:
       - name: Run pre-commit file checks
         run: uv run --locked --extra dev pre-commit run --all-files --show-diff-on-failure
 
-      - name: Run full test suite
-        run: uv run --locked --extra dev pytest -q
+      - name: Run unit and functional test suite
+        run: uv run --locked --extra dev pytest -m "not integration" -q
 
       - name: Guard 100-image graph planning performance
         run: >-

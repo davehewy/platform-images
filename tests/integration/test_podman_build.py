@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from functools import cache
 from pathlib import Path
 
 import pytest
@@ -9,47 +10,42 @@ import pytest
 from platform_images.cli import main
 
 
+def _command_succeeds(arguments: list[str]) -> bool:
+    if shutil.which(arguments[0]) is None:
+        return False
+    try:
+        result = subprocess.run(
+            arguments,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+@cache
 def podman_available() -> bool:
-    if shutil.which("podman") is None:
-        return False
-    result = subprocess.run(
-        ["podman", "info"], check=False, capture_output=True, text=True, timeout=15
-    )
-    return result.returncode == 0
+    return _command_succeeds(["podman", "info"])
 
 
+@cache
 def docker_available() -> bool:
-    if shutil.which("docker") is None:
-        return False
-    result = subprocess.run(
-        ["docker", "info"], check=False, capture_output=True, text=True, timeout=15
+    return _command_succeeds(["docker", "info"]) and _command_succeeds(
+        ["docker", "buildx", "version"]
     )
-    buildx = subprocess.run(
-        ["docker", "buildx", "version"],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
-    return result.returncode == 0 and buildx.returncode == 0
 
 
+@cache
 def buildah_available() -> bool:
-    if shutil.which("buildah") is None:
-        return False
-    result = subprocess.run(
-        ["buildah", "info"], check=False, capture_output=True, text=True, timeout=15
-    )
-    return result.returncode == 0
+    return _command_succeeds(["buildah", "info"])
 
 
+@cache
 def nerdctl_available() -> bool:
-    if shutil.which("nerdctl") is None or shutil.which("buildctl") is None:
-        return False
-    result = subprocess.run(
-        ["nerdctl", "info"], check=False, capture_output=True, text=True, timeout=15
-    )
-    return result.returncode == 0
+    return shutil.which("buildctl") is not None and _command_succeeds(["nerdctl", "info"])
 
 
 @pytest.mark.integration
@@ -89,8 +85,9 @@ def test_fully_qualified_local_parent_is_replaced_by_planned_image(
 
 
 @pytest.mark.integration
-@pytest.mark.skipif(not podman_available(), reason="a working Podman service is unavailable")
 def test_curl_consumes_controller_selected_local_base() -> None:
+    if not podman_available():
+        pytest.skip("a working Podman service is unavailable")
     root = Path(__file__).parents[2]
     assert main(["images", "build", "curl"], cwd=root) == 0
     version = subprocess.run(
@@ -122,8 +119,9 @@ def test_curl_consumes_controller_selected_local_base() -> None:
 
 
 @pytest.mark.integration
-@pytest.mark.skipif(not docker_available(), reason="a working Docker Buildx service is unavailable")
 def test_docker_buildx_consumes_controller_selected_local_base() -> None:
+    if not docker_available():
+        pytest.skip("a working Docker Buildx service is unavailable")
     root = Path(__file__).parents[2]
     assert main(["images", "build", "curl", "--engine", "docker"], cwd=root) == 0
     marker = subprocess.run(
@@ -146,8 +144,9 @@ def test_docker_buildx_consumes_controller_selected_local_base() -> None:
 
 
 @pytest.mark.integration
-@pytest.mark.skipif(not buildah_available(), reason="a working Buildah setup is unavailable")
 def test_buildah_consumes_controller_selected_local_base() -> None:
+    if not buildah_available():
+        pytest.skip("a working Buildah setup is unavailable")
     root = Path(__file__).parents[2]
     assert main(["images", "build", "curl", "--builder", "buildah"], cwd=root) == 0
     created = subprocess.run(
@@ -183,10 +182,9 @@ def test_buildah_consumes_controller_selected_local_base() -> None:
 
 
 @pytest.mark.integration
-@pytest.mark.skipif(
-    not nerdctl_available(), reason="working containerd and BuildKit services are unavailable"
-)
 def test_nerdctl_consumes_controller_selected_local_base() -> None:
+    if not nerdctl_available():
+        pytest.skip("working containerd and BuildKit services are unavailable")
     root = Path(__file__).parents[2]
     assert main(["images", "build", "curl", "--builder", "nerdctl"], cwd=root) == 0
     marker = subprocess.run(
