@@ -25,10 +25,11 @@
   <text class="title" x="480" y="31" text-anchor="middle">platform-images — dependency-aware builds</text>
 
   <text x="30" y="84"><tspan class="prompt">$</tspan><tspan class="command"> platform images graph</tspan></text>
-  <text x="30" y="116">base</text>
-  <text x="30" y="144">└── curl</text>
-  <text class="muted" x="270" y="116"># inferred from images/curl/Dockerfile</text>
-  <text class="success" x="270" y="144">✓ no central image registry file</text>
+  <text x="30" y="108">Container image dependency graph</text>
+  <text x="30" y="132">└── base</text>
+  <text x="54" y="156">└── curl</text>
+  <text class="muted" x="270" y="132"># inferred from images/curl/Dockerfile</text>
+  <text class="success" x="270" y="156">✓ no central image registry file</text>
 
   <line class="rule" x1="30" y1="174" x2="930" y2="174" />
 

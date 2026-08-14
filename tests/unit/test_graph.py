@@ -50,7 +50,17 @@ def test_disconnected_images_are_sorted(
     graph = graph_for(repository_factory({"z": "FROM alpine\n", "a": "FROM busybox\n"}))
     assert graph.roots() == ("a", "z")
     assert graph.topological_order() == ("a", "z")
-    assert render_graph_text(graph) == "a\n\nz"
+    assert render_graph_text(graph) == ("Container image dependency graph\n├── a\n└── z")
+
+
+def test_ascii_tree_has_visible_root_and_dependency_connectors(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    graph = graph_for(repository_factory({"base": "FROM alpine\n", "curl": "FROM base\n"}))
+
+    assert render_graph_text(graph, ascii_only=True) == (
+        "Container image dependency graph\n\\-- base\n    \\-- curl"
+    )
 
 
 def test_upstream_and_downstream_closures(

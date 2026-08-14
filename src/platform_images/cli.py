@@ -204,6 +204,11 @@ Run 'platform images COMMAND --help' for command-specific options.
         description="Print the complete container-image dependency DAG.",
     )
     graph.add_argument("--format", choices=("text", "json"), default="text")
+    graph.add_argument(
+        "--ascii",
+        action="store_true",
+        help="use portable ASCII tree connectors instead of Unicode line drawing",
+    )
 
     build = commands.add_parser(
         "build",
@@ -755,7 +760,7 @@ def _run(arguments: argparse.Namespace, cwd: Path | None, environment: Mapping[s
         print(
             render_graph_json(graph, root)
             if arguments.format == "json"
-            else render_graph_text(graph, ascii_only=sys.platform == "win32")
+            else render_graph_text(graph, ascii_only=arguments.ascii or sys.platform == "win32")
         )
         return 0
     if arguments.command == "build":

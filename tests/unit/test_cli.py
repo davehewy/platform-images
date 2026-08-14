@@ -192,7 +192,7 @@ def test_init_then_graph_ignores_non_image_directories(tmp_path: Path, capsys) -
     capsys.readouterr()
 
     assert main(["images", "graph"], cwd=root, environment={}) == 0
-    assert capsys.readouterr().out == "api\n"
+    assert capsys.readouterr().out == "Container image dependency graph\n└── api\n"
 
 
 def test_init_rejects_repository_root_build_file(tmp_path: Path, capsys) -> None:
@@ -242,7 +242,7 @@ def test_list_validate_graph_and_dry_run(
     assert json.loads(capsys.readouterr().out)["valid"] is True
 
     assert main(["images", "graph"], cwd=root, environment={}) == 0
-    assert capsys.readouterr().out == "base\n└── curl\n"
+    assert capsys.readouterr().out == ("Container image dependency graph\n└── base\n    └── curl\n")
 
     assert main(["images", "build", "curl", "--dry-run"], cwd=root, environment={}) == 0
     commands = capsys.readouterr().out
@@ -260,7 +260,23 @@ def test_graph_uses_ascii_tree_on_windows(
 
     assert main(["images", "graph"], cwd=root, environment={}) == 0
 
-    assert capsys.readouterr().out == "base\n\\-- curl\n"
+    assert capsys.readouterr().out == (
+        "Container image dependency graph\n\\-- base\n    \\-- curl\n"
+    )
+
+
+def test_graph_can_force_ascii_tree_on_any_platform(
+    repository_factory: Callable[[dict[str, str]], Path], capsys
+) -> None:
+    root = repository_factory(
+        {"base": "FROM alpine\n", "curl": "FROM base\n", "healthcheck": "FROM busybox\n"}
+    )
+
+    assert main(["images", "graph", "--ascii"], cwd=root, environment={}) == 0
+
+    assert capsys.readouterr().out == (
+        "Container image dependency graph\n+-- base\n|   \\-- curl\n\\-- healthcheck\n"
+    )
 
 
 def test_build_supports_nerdctl_and_buildah_dry_runs(
@@ -329,7 +345,7 @@ def test_commands_build_a_cross_root_dependency_chain(
     )
 
     assert main(["images", "graph"], cwd=root, environment={}) == 0
-    assert capsys.readouterr().out == "base\n└── api\n"
+    assert capsys.readouterr().out == ("Container image dependency graph\n└── base\n    └── api\n")
     assert main(["images", "build", "api", "--dry-run"], cwd=root, environment={}) == 0
     output = capsys.readouterr().out
     assert "containers/shared/base/Containerfile" in output

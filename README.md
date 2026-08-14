@@ -281,8 +281,9 @@ CMD ["--version"]
 The tool resolves `base` as the checked-in target—not as `docker.io/library/base`—and discovers:
 
 ```text
-base
-└── curl
+Container image dependency graph
+└── base
+    └── curl
 ```
 
 ## Demonstration
@@ -330,12 +331,14 @@ curl
   dependents: none
 
 $ platform images graph
-base
-└── curl
+Container image dependency graph
+└── base
+    └── curl
 ```
 
 Use `--format json` with `show`, `validate`, or `graph` when another tool needs to consume the
-result. JSON output includes a schema version so it can be treated as an automation contract.
+result. JSON output includes a schema version so it can be treated as an automation contract. Use
+`platform images graph --ascii` when a terminal cannot display Unicode line-drawing characters.
 
 ### Worked example 2: build a dependent image locally
 
@@ -675,9 +678,10 @@ $ platform images validate
 Validation passed (3 image targets).
 
 $ platform images graph
-base
-└── curl
-    └── debug
+Container image dependency graph
+└── base
+    └── curl
+        └── debug
 ```
 
 A change to `base` rebuilds `base`, `curl`, and `debug`; a change to `curl` rebuilds `curl` and
@@ -715,9 +719,10 @@ Because `busybox` is an allowed external image rather than a local target, the r
 forest with two roots:
 
 ```text
-base
-└── curl
-healthcheck
+Container image dependency graph
+├── base
+│   └── curl
+└── healthcheck
 ```
 
 The selection behavior is now:
@@ -789,10 +794,11 @@ platform/observability/builds/collector/Containerfile   # independent
 Discovery produces one repository-wide graph:
 
 ```text
-base
-├── api
-└── worker
-collector
+Container image dependency graph
+├── base
+│   ├── api
+│   └── worker
+└── collector
 ```
 
 A change beneath `services/payments/container-images/api/` selects only `api`; a change beneath
@@ -1168,7 +1174,7 @@ over stdin. Use the organisation's short-lived workload identity for AWS authent
 | `platform images list` | Inventory discovered image targets. |
 | `platform images show <name>` | Inspect one target's direct dependencies and dependents. |
 | `platform images validate` | Gate commits before planning or building. |
-| `platform images graph [--format json]` | Review or export the complete dependency graph. |
+| `platform images graph [--format json] [--ascii]` | Review or export the complete dependency graph. Text output is always a visibly connected tree; `--ascii` replaces Unicode line drawing for limited terminals. |
 | `platform images build <name> [--dry-run] [--no-deps] [--builder <name>]` | Build locally with deterministic dependency binding using the configured or selected backend. |
 | `platform images changed --base <sha> --head <sha>` | Show directly changed targets and removed target directories. |
 | `platform images affected --base <sha> --head <sha>` | Show the topologically ordered downstream rebuild set. |

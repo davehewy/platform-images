@@ -9,7 +9,7 @@ def render_graph_text(graph: ImageGraph, *, ascii_only: bool = False) -> str:
     cycle = graph.find_cycle()
     if cycle:
         return "local image dependency cycle detected:\n" + " -> ".join(cycle)
-    lines: list[str] = []
+    lines = ["Container image dependency graph"]
     branches = ("+-- ", "\\-- ") if ascii_only else ("├── ", "└── ")
     vertical = "|   " if ascii_only else "│   "
 
@@ -25,10 +25,9 @@ def render_graph_text(graph: ImageGraph, *, ascii_only: bool = False) -> str:
 
     roots = graph.roots()
     for root_index, root in enumerate(roots):
-        if root_index:
-            lines.append("")
-        lines.append(root)
-        render_children(root, (), frozenset({root}))
+        last = root_index == len(roots) - 1
+        lines.append(f"{branches[last]}{root}")
+        render_children(root, (last,), frozenset({root}))
     if any(len(dependencies) > 1 for dependencies in graph.dependencies.values()):
         lines.extend(["", "(*) target has more than one local dependency"])
     return "\n".join(lines)
