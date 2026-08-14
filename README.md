@@ -26,8 +26,9 @@ information already exists in instructions such as `FROM base`, but normal CI pa
 understand it. They also do not solve how independently scheduled jobs pass the exact newly built
 parent image to their consumers.
 
-This tool discovers one target per direct directory beneath a configurable repository-relative
-root (`images` by default). Each target can use either `Dockerfile` or `Containerfile`. It infers
+This tool discovers one target per direct directory beneath one or more configurable
+repository-relative roots (`images` by default). Each target can use either `Dockerfile` or
+`Containerfile`. It infers
 their **build-time** dependency graph, maps a Git diff onto that graph, and follows changes
 downstream. It can render dynamic GitLab child-pipeline jobs or generate a complete GitHub Actions
 workflow. Docker Buildx, Podman, Buildah, and nerdctl/BuildKit are supported explicitly. Every
@@ -57,6 +58,7 @@ before consumers, while unrelated nodes remain parallelizable.
 - [CI operating model](#ci-operating-model)
 - [GitHub Actions workflow generation](docs/github-actions.md)
 - [GitLab child pipelines](docs/gitlab-ci.md)
+- [Performance and scaling](#performance-and-scaling)
 - [Quality and integration checks](#quality-and-integration-checks)
 - [Support and contributing](#support-and-contributing)
 - [License](#license)
@@ -249,8 +251,9 @@ platform images generate-workflow github --output .github/workflows/container-im
 ## Worked examples
 
 Paths beginning with `images/` in the worked examples are outputs from this repository's checked-in
-configuration, not a required layout. Set `discovery.root` to your own repository-relative location;
-the inventory, change mapping, plans, and rendered pipelines will use that path instead.
+configuration, not a required layout. Set `discovery.roots` to any repository-relative locations
+that reflect your ownership model; inventory, change mapping, plans, and rendered pipelines use
+those paths instead.
 
 ### Worked example 1: inspect what the repository owns
 
@@ -541,7 +544,7 @@ selected.
 
 ### Worked example 9: a shared build input changes
 
-Some files affect every image even though they do not live beneath the configured discovery root.
+Some files affect every image even though they do not live beneath a configured discovery root.
 Add those paths to `changes.global_inputs`:
 
 ```toml
@@ -683,6 +686,42 @@ also fails. If images reference each other cyclically, validation reports the de
 These fail-closed checks turn repository mistakes into reviewable errors rather than surprising
 registry pulls or deadlocked pipelines.
 
+### Worked example 14: discover images across several ownership areas
+
+A monorepo does not need to move every container definition under one directory. Point discovery
+at the existing areas instead:
+
+```toml
+[discovery]
+roots = [
+  "containers/shared",
+  "services/payments/container-images",
+  "platform/observability/builds",
+]
+```
+
+```text
+containers/shared/base/Containerfile
+services/payments/container-images/api/Dockerfile       # FROM base
+services/payments/container-images/worker/Dockerfile    # FROM base
+platform/observability/builds/collector/Containerfile   # independent
+```
+
+Discovery produces one repository-wide graph:
+
+```text
+base
+├── api
+└── worker
+collector
+```
+
+A change beneath `services/payments/container-images/api/` selects only `api`; a change beneath
+`containers/shared/base/` selects `base`, `api`, and `worker`. The roots only locate targets—the
+target names and inferred edges are global. Consequently, defining `api` beneath two roots is an
+error with both paths reported, as is configuring roots that overlap. Those checks prevent a Git
+path from binding to one target while a Dockerfile reference binds to another.
+
 ## Configuration capabilities
 
 Configuration lives in `platform-images.toml`. This repository's complete configuration is:
@@ -702,7 +741,7 @@ commit_prefix = "sha"
 backend = "podman"
 
 [discovery]
-root = "images"
+roots = ["images"]
 
 [dockerfile]
 allowed_short_external_images = ["alpine", "busybox"]
@@ -750,24 +789,28 @@ promotion moves only the stable alias after success.
 
 | Setting | What it controls | When and why to change it |
 | --- | --- | --- |
-| `discovery.root` | Repository-relative directory whose direct children are logical image targets. Defaults to `images`. | Set it to an existing monorepo convention such as `containers`, `deploy/images`, or `platform/container-images`. This is not the repository root and cannot be absolute or escape through `..`. |
+| `discovery.roots` | Non-empty array of repository-relative directories whose direct children are logical image targets. Defaults to `["images"]`. | Include each existing ownership area that contains image targets, whether central or service-local. Roots cannot be absolute, escape through `..`, duplicate one another, or overlap. |
+| `discovery.root` | Backward-compatible singular form for one root. | Existing configurations may keep it. New configurations should use `roots`, even for one location, so adding another is a one-line change. Do not set both forms. |
 
-For example, this discovers `api` and `worker` without a registration list:
+For example, this discovers `base`, `api`, and `worker` without a registration list:
 
 ```toml
 [discovery]
-root = "deploy/container-images"
+roots = ["containers/shared", "services/payments/images"]
 ```
 
 ```text
-deploy/container-images/
-├── api/Containerfile
+containers/shared/
+└── base/Containerfile
+services/payments/images/
+├── api/Dockerfile
 └── worker/Dockerfile
 ```
 
 Target ownership, Git change mapping, validation paths, contexts, and generated plans all use the
-configured root. The target names remain `api` and `worker`, so local dependency instructions stay
-portable: `FROM api` rather than a repository path.
+matching configured root. Names remain repository-wide logical identifiers, so `api` can use
+`FROM base` across roots without encoding either directory in the Dockerfile. Every logical name
+must therefore be unique across all roots, case-insensitively.
 
 ### Build backend and registry transport settings
 
@@ -831,7 +874,7 @@ global_inputs = [
 ```
 
 Use this for files actually read by multiple image builds or for policy that changes the meaning of
-all builds. Do not use it for ordinary per-image inputs beneath `discovery.root`; those are mapped
+all builds. Do not use it for ordinary per-image inputs beneath `discovery.roots`; those are mapped
 to their owning target automatically. Configured patterns are unioned with the mandatory controller
 inputs listed earlier.
 
@@ -854,9 +897,9 @@ over stdin. Use the organisation's short-lived workload identity for AWS authent
 
 ## Recommended adoption flow
 
-1. Choose `discovery.root` and put each owned target in one of its direct child directories. Keep
-   exactly one `Dockerfile` or `Containerfile` per target and keep ordinary context files alongside
-   it.
+1. Configure `discovery.roots` around the repository's existing ownership areas and put each owned
+   target in a direct child directory of one of them. Keep exactly one `Dockerfile` or
+   `Containerfile` per target and keep ordinary context files alongside it.
 2. Replace internal registry references between these images with logical names such as
    `FROM base`.
 3. Configure the registry namespace, stable tag, approved short external images, and genuine shared
@@ -923,11 +966,42 @@ See [architecture](docs/architecture.md), [adding an image](docs/adding-an-image
 [ECR setup](docs/ecr-setup.md), and
 [contributing and releases](CONTRIBUTING.md).
 
+## Performance and scaling
+
+The repository includes a reproducible synthetic benchmark with 100 images spread across three
+discovery roots and 292 build-time dependency edges:
+
+```bash
+uv run --locked python scripts/benchmark-graph.py --images 100 --iterations 25
+```
+
+Use `--json` to capture results, or `--max-leaf-plan-ms <milliseconds>` to make a performance
+budget enforceable. A reference run on the development machine produced approximately 23 ms for
+full discovery, Dockerfile parsing, validation, and graph construction; 0.07 ms for a complete
+topological order; 4.5 ms for planning the deepest leaf and all 99 upstream images; and 0.10 ms for
+mapping a root change to all 100 affected images. These are comparative figures, not hardware
+guarantees; run the script on the intended CI runner when setting a local budget.
+
+The implementation avoids work that grows quadratically with the number of images:
+
+- inverse dependency edges are constructed in one pass over the graph;
+- deterministic topological ordering uses a priority queue;
+- affected selection visits each reachable target and edge once; and
+- local dependency reasons propagate through one reverse topological pass, using compact bitsets
+  when several explicit targets are selected.
+
+CI runs the same 100-image benchmark with a deliberately generous 50 ms median budget for deep-leaf
+planning. That catches accidental reintroduction of per-target closure scans without turning normal
+runner variance into flaky builds. Dockerfile reads and parsing remain the largest controller cost;
+actual container builds and registry transfers will ordinarily dominate total pipeline time by
+orders of magnitude.
+
 ## Quality and integration checks
 
 ```bash
 uv run --locked --extra dev pre-commit run --all-files
 uv run --locked --extra dev pytest
+uv run --locked python scripts/benchmark-graph.py --images 100 --iterations 25
 uv run --locked --extra dev pytest -m integration
 uv build
 ```

@@ -5,9 +5,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from platform_images.config import NAMESPACE_RE, RepositoryConfig
-from platform_images.discovery import discover_targets, valid_target_name
+from platform_images.discovery import inspect_targets, valid_target_name
 from platform_images.graph import ImageGraph, build_graph
-from platform_images.models import ReferenceKind
+from platform_images.models import ImageTarget, ReferenceKind
 
 
 @dataclass(frozen=True)
@@ -47,19 +47,19 @@ def _relative(path: Path, root: Path) -> str:
 
 def validate_repository(config: RepositoryConfig) -> ValidationReport:
     root = config.root
-    targets = discover_targets(root, config.discovery.root)
+    discovery = inspect_targets(root, config.discovery.roots)
+    targets = discovery.targets
     graph = build_graph(targets, config)
     issues: list[ValidationIssue] = []
 
-    discovery_root = root / config.discovery.root
-    if not discovery_root.is_dir():
+    for missing_root in discovery.missing_roots:
         issues.append(
             ValidationIssue(
                 "missing-discovery-root",
                 "error",
                 "configured target discovery root does not exist or is not a directory",
-                config.discovery.root,
-                hint="create the directory or correct discovery.root in platform-images.toml",
+                missing_root,
+                hint="create the directory or correct discovery.roots in platform-images.toml",
             )
         )
 
@@ -73,9 +73,10 @@ def validate_repository(config: RepositoryConfig) -> ValidationReport:
             )
         )
 
-    folded: dict[str, list[str]] = {}
-    for name, target in targets.items():
-        folded.setdefault(name.casefold(), []).append(name)
+    folded: dict[str, list[tuple[str, ImageTarget]]] = {}
+    for target in discovery.entries:
+        name = target.name
+        folded.setdefault(name.casefold(), []).append((name, target))
         path = _relative(target.directory, root)
         if not valid_target_name(name):
             issues.append(
@@ -125,15 +126,16 @@ def validate_repository(config: RepositoryConfig) -> ValidationReport:
                         path,
                     )
                 )
-    for names in folded.values():
-        if len(names) > 1:
-            for name in sorted(names):
+    for entries in folded.values():
+        if len(entries) > 1:
+            ordered_entries = sorted(entries, key=lambda entry: _relative(entry[1].directory, root))
+            for name, target in ordered_entries:
                 issues.append(
                     ValidationIssue(
                         "duplicate-target-name",
                         "error",
                         f"duplicate logical target name (case-insensitive): {name}",
-                        f"{config.discovery.root}/{name}",
+                        _relative(target.directory, root),
                     )
                 )
 

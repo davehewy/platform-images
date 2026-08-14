@@ -95,6 +95,36 @@ def test_path_mapping_uses_the_configured_discovery_root(
     assert changes.reasons == {"api": ("source-changed:deploy/container-images/api/Dockerfile",)}
 
 
+def test_path_mapping_uses_every_configured_discovery_root(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory({})
+    config_path = root / "platform-images.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        + '\n[discovery]\nroots = ["containers/shared", "services/payments/images"]\n',
+        encoding="utf-8",
+    )
+    config = RepositoryConfig.load(root)
+
+    changes = map_changes(
+        (
+            ChangedPath("M", None, "containers/shared/base/files/config"),
+            ChangedPath("M", None, "services/payments/images/api/Dockerfile"),
+            ChangedPath("D", "services/payments/images/retired/Containerfile", None),
+        ),
+        {"api": object(), "base": object()},
+        config,
+    )
+
+    assert changes.changed_targets == {"api", "base"}
+    assert changes.removed_targets == {"retired"}
+    assert changes.reasons == {
+        "api": ("source-changed:services/payments/images/api/Dockerfile",),
+        "base": ("source-changed:containers/shared/base/files/config",),
+    }
+
+
 def test_real_git_modify_add_rename_remove_and_spaces(git_repository: Path) -> None:
     root = git_repository
     config = RepositoryConfig.load(root)

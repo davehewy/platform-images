@@ -40,6 +40,11 @@ jobs:
       - name: Run full test suite
         run: uv run --locked --extra dev pytest -q
 
+      - name: Guard 100-image graph planning performance
+        run: >-
+          uv run --locked python scripts/benchmark-graph.py
+          --images 100 --iterations 10 --max-leaf-plan-ms 50
+
       - name: Validate pull request title
         if: github.event_name == 'pull_request'
         env:

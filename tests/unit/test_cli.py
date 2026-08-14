@@ -91,6 +91,31 @@ def test_commands_discover_a_configured_nested_target_root(
     assert "deploy/container-images/api/Containerfile" in capsys.readouterr().out
 
 
+def test_commands_build_a_cross_root_dependency_chain(
+    repository_factory: Callable[[dict[str, str]], Path], capsys
+) -> None:
+    root = repository_factory({})
+    base = root / "containers" / "shared" / "base"
+    api = root / "services" / "payments" / "images" / "api"
+    base.mkdir(parents=True)
+    api.mkdir(parents=True)
+    (base / "Containerfile").write_text("FROM alpine\n", encoding="utf-8")
+    (api / "Dockerfile").write_text("FROM base\n", encoding="utf-8")
+    config_path = root / "platform-images.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        + '\n[discovery]\nroots = ["containers/shared", "services/payments/images"]\n',
+        encoding="utf-8",
+    )
+
+    assert main(["images", "graph"], cwd=root, environment={}) == 0
+    assert capsys.readouterr().out == "base\n└── api\n"
+    assert main(["images", "build", "api", "--dry-run"], cwd=root, environment={}) == 0
+    output = capsys.readouterr().out
+    assert "containers/shared/base/Containerfile" in output
+    assert "services/payments/images/api/Dockerfile" in output
+
+
 def test_validation_exit_code_and_json_error_code(
     repository_factory: Callable[[dict[str, str]], Path], capsys
 ) -> None:

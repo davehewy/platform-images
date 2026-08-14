@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import heapq
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -30,7 +31,7 @@ class ImageGraph:
         return tuple(sorted(self.dependents[target]))
 
     def upstream_closure(self, targets: set[str] | frozenset[str]) -> frozenset[str]:
-        pending = list(sorted(targets, reverse=True))
+        pending = list(targets)
         result: set[str] = set()
         while pending:
             target = pending.pop()
@@ -38,11 +39,11 @@ class ImageGraph:
             if target in result:
                 continue
             result.add(target)
-            pending.extend(sorted(self.dependencies[target], reverse=True))
+            pending.extend(self.dependencies[target])
         return frozenset(result)
 
     def downstream_closure(self, targets: set[str] | frozenset[str]) -> frozenset[str]:
-        pending = list(sorted(targets, reverse=True))
+        pending = list(targets)
         result: set[str] = set()
         while pending:
             target = pending.pop()
@@ -50,7 +51,7 @@ class ImageGraph:
             if target in result:
                 continue
             result.add(target)
-            pending.extend(sorted(self.dependents[target], reverse=True))
+            pending.extend(self.dependents[target])
         return frozenset(result)
 
     def topological_order(
@@ -62,16 +63,18 @@ class ImageGraph:
         indegree = {
             target: len(self.dependencies[target].intersection(selected)) for target in selected
         }
-        ready = sorted(target for target, degree in indegree.items() if degree == 0)
+        ready = [target for target, degree in indegree.items() if degree == 0]
+        heapq.heapify(ready)
         result: list[str] = []
         while ready:
-            target = ready.pop(0)
+            target = heapq.heappop(ready)
             result.append(target)
-            for dependent in sorted(self.dependents[target].intersection(selected)):
+            for dependent in self.dependents[target]:
+                if dependent not in selected:
+                    continue
                 indegree[dependent] -= 1
                 if indegree[dependent] == 0:
-                    ready.append(dependent)
-                    ready.sort()
+                    heapq.heappush(ready, dependent)
         if len(result) != len(selected):
             cycle = self.find_cycle()
             raise GraphCycleError(cycle or tuple(sorted(selected)))
@@ -159,10 +162,11 @@ def build_graph(targets: Mapping[str, ImageTarget], config: RepositoryConfig) ->
                 key=lambda r: (r.line_number, r.instruction, r.raw),
             )
         )
-    dependents = {
-        name: frozenset(candidate for candidate, deps in dependencies.items() if name in deps)
-        for name in sorted(targets)
-    }
+    mutable_dependents: dict[str, set[str]] = {name: set() for name in targets}
+    for candidate, candidate_dependencies in dependencies.items():
+        for dependency in candidate_dependencies:
+            mutable_dependents[dependency].add(candidate)
+    dependents = {name: frozenset(mutable_dependents[name]) for name in sorted(mutable_dependents)}
     return ImageGraph(
         targets=dict(sorted(targets.items())),
         dependencies=dependencies,

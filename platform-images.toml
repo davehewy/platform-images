@@ -12,7 +12,7 @@ commit_prefix = "sha"
 backend = "podman"
 
 [discovery]
-root = "images"
+roots = ["images"]
 
 [dockerfile]
 allowed_short_external_images = ["alpine", "busybox"]

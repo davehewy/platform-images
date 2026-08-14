@@ -1,8 +1,9 @@
 # Adding an image
 
-1. Beneath the configured `discovery.root`, create a direct target directory containing exactly one
-   `Dockerfile` or `Containerfile`. Both use the same instruction syntax. Target names use lowercase
-   letters and digits, optionally separated by `.`, `_`, or `-`.
+1. Beneath any configured `discovery.roots` entry, create a direct target directory containing
+   exactly one `Dockerfile` or `Containerfile`. Both use the same instruction syntax. Target names
+   use lowercase letters and digits, optionally separated by `.`, `_`, or `-`, and must remain
+   unique across every configured root.
 2. Use a logical local target name in `FROM`, `COPY`/`ADD --from`, or `RUN --mount=from` when
    appropriate, for example `FROM base`. Do not add image metadata merely to describe an
    inferable dependency.

@@ -90,11 +90,14 @@ def _matches(path: str, patterns: Sequence[str]) -> bool:
     return False
 
 
-def _target_for_path(path: str, discovery_root: str) -> str | None:
+def _target_for_path(
+    path: str,
+    discovery_roots: tuple[tuple[str, ...], ...],
+) -> str | None:
     parts = PurePosixPath(path).parts
-    root_parts = PurePosixPath(discovery_root).parts
-    if len(parts) >= len(root_parts) + 2 and parts[: len(root_parts)] == root_parts:
-        return parts[len(root_parts)]
+    for root_parts in discovery_roots:
+        if len(parts) >= len(root_parts) + 2 and parts[: len(root_parts)] == root_parts:
+            return parts[len(root_parts)]
     return None
 
 
@@ -108,12 +111,15 @@ def map_changes(
     removed: set[str] = set()
     global_paths: set[str] = set()
     global_inputs = tuple(sorted(set(MANDATORY_GLOBAL_INPUTS).union(config.changes.global_inputs)))
+    discovery_roots = tuple(
+        PurePosixPath(discovery_root).parts for discovery_root in config.discovery.roots
+    )
 
     for change in changed_files:
         for path in change.paths:
             if _matches(path, global_inputs):
                 global_paths.add(path)
-            target_name = _target_for_path(path, config.discovery.root)
+            target_name = _target_for_path(path, discovery_roots)
             if target_name is None:
                 continue
             if target_name in target_names:

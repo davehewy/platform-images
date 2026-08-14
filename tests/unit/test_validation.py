@@ -103,6 +103,126 @@ def test_discovery_root_is_repository_relative(
         RepositoryConfig.load(root)
 
 
+def test_multiple_discovery_roots_load_and_resolve_cross_root_dependencies(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory({})
+    config_path = root / "platform-images.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        + '\n[discovery]\nroots = ["containers/shared", "services/api/images"]\n',
+        encoding="utf-8",
+    )
+    base = root / "containers" / "shared" / "base"
+    api = root / "services" / "api" / "images" / "api"
+    base.mkdir(parents=True)
+    api.mkdir(parents=True)
+    (base / "Containerfile").write_text("FROM alpine\n", encoding="utf-8")
+    (api / "Dockerfile").write_text("FROM base\n", encoding="utf-8")
+
+    config = RepositoryConfig.load(root)
+    report = validate_repository(config)
+
+    assert config.discovery.roots == ("containers/shared", "services/api/images")
+    assert report.valid
+    assert report.graph.direct_dependencies("api") == ("base",)
+    assert report.graph.targets["base"].context == base
+
+
+def test_legacy_single_discovery_root_remains_supported(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory({})
+    config_path = root / "platform-images.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8") + '\n[discovery]\nroot = "containers"\n',
+        encoding="utf-8",
+    )
+    (root / "containers").mkdir()
+
+    config = RepositoryConfig.load(root)
+
+    assert config.discovery.roots == ("containers",)
+    assert config.discovery.root == "containers"
+
+
+def test_discovery_root_and_roots_cannot_both_be_set(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory({})
+    config_path = root / "platform-images.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        + '\n[discovery]\nroot = "images"\nroots = ["containers"]\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="cannot both be set"):
+        RepositoryConfig.load(root)
+
+
+@pytest.mark.parametrize(
+    "roots",
+    (
+        "[]",
+        '["images", "images"]',
+        '["containers", "containers/team-a"]',
+        '["../images"]',
+    ),
+)
+def test_invalid_multiple_discovery_roots_are_rejected(
+    repository_factory: Callable[[dict[str, str]], Path], roots: str
+) -> None:
+    root = repository_factory({})
+    config_path = root / "platform-images.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8") + f"\n[discovery]\nroots = {roots}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError):
+        RepositoryConfig.load(root)
+
+
+def test_duplicate_target_names_across_roots_fail_with_both_paths(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory({})
+    config_path = root / "platform-images.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        + '\n[discovery]\nroots = ["containers/team-a", "containers/team-b"]\n',
+        encoding="utf-8",
+    )
+    for discovery_root in ("containers/team-a", "containers/team-b"):
+        target = root / discovery_root / "api"
+        target.mkdir(parents=True)
+        (target / "Dockerfile").write_text("FROM alpine\n", encoding="utf-8")
+
+    report = validate_repository(RepositoryConfig.load(root))
+    duplicate_paths = {
+        issue.path for issue in report.errors if issue.code == "duplicate-target-name"
+    }
+
+    assert duplicate_paths == {"containers/team-a/api", "containers/team-b/api"}
+
+
+def test_each_missing_discovery_root_is_reported(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory({})
+    config_path = root / "platform-images.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        + '\n[discovery]\nroots = ["missing-a", "missing-b"]\n',
+        encoding="utf-8",
+    )
+
+    report = validate_repository(RepositoryConfig.load(root))
+
+    assert {issue.path for issue in report.errors} == {"missing-a", "missing-b"}
+
+
 def test_missing_configured_discovery_root_fails_closed(
     repository_factory: Callable[[dict[str, str]], Path],
 ) -> None:

@@ -16,6 +16,16 @@ def _relative(path: Path, root: Path) -> str:
     return path.relative_to(root).as_posix()
 
 
+def _dependency_reasons(mask: int, selected_names: tuple[str, ...]) -> tuple[str, ...]:
+    reasons: list[str] = []
+    while mask:
+        selected_bit = mask & -mask
+        index = selected_bit.bit_length() - 1
+        reasons.append(f"dependency-of:{selected_names[index]}")
+        mask ^= selected_bit
+    return tuple(reasons)
+
+
 def local_plan(
     graph: ImageGraph,
     config: RepositoryConfig,
@@ -25,6 +35,14 @@ def local_plan(
 ) -> BuildPlan:
     build_targets = graph.upstream_closure(selected) if include_dependencies else selected
     order = graph.topological_order(build_targets)
+    selected_names = tuple(sorted(selected))
+    selected_bits = {name: 1 << index for index, name in enumerate(selected_names)}
+    consumer_masks = {name: selected_bits.get(name, 0) for name in build_targets}
+    for consumer in reversed(order):
+        for dependency in graph.dependencies[consumer]:
+            if dependency not in build_targets:
+                continue
+            consumer_masks[dependency] |= consumer_masks[consumer]
     policy = ReferencePolicy(config)
     plan_targets: list[BuildPlanTarget] = []
     for name in order:
@@ -33,12 +51,7 @@ def local_plan(
         if name in selected:
             reasons = ("selected",)
         else:
-            consumers = sorted(
-                candidate
-                for candidate in build_targets
-                if name in graph.upstream_closure(frozenset({candidate})) and candidate in selected
-            )
-            reasons = tuple(f"dependency-of:{consumer}" for consumer in consumers)
+            reasons = _dependency_reasons(consumer_masks[name], selected_names)
         plan_targets.append(
             BuildPlanTarget(
                 name=name,

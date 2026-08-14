@@ -6,8 +6,9 @@ and testable.
 
 ## Data flow
 
-1. **Discovery** maps every direct child of configurable `discovery.root` to an immutable
-   `ImageTarget`. The default root is `images`, but nested repository-relative roots are supported.
+1. **Discovery** maps every direct child of each configured `discovery.roots` entry to an immutable
+   `ImageTarget`. The default is `["images"]`, but the roots may be nested anywhere within the
+   repository. Logical target names are global and case-insensitively unique across all roots.
 2. **Parser** reads logical Dockerfile/Containerfile instructions, global `ARG` defaults, `FROM` sources, stage
    aliases, `COPY`/`ADD --from` sources, and `RUN --mount=from` sources while excluding heredoc
    bodies. It distinguishes local, external, stage, and unresolved references.
@@ -47,6 +48,13 @@ cycle detection and reports the closed path; planning refuses to continue until 
 removed. Topological ordering reverses the dependency constraint for execution, ensuring every
 selected input completes before its consumer. GitLab expresses direct selected edges with `needs`;
 GitHub groups the same partial DAG into dependency-safe parallel layers.
+
+The main graph operations are designed around edges rather than repeated whole-graph scans.
+Inverse adjacency is built in `O(V + E)`, deterministic topological ordering uses a heap in
+`O((V + E) log V)`, and affected propagation is `O(V + E)` over the reachable subgraph. A local
+plan computes its upstream closure once, then propagates selected-consumer reasons in one reverse
+topological pass. `scripts/benchmark-graph.py` exercises these paths with a configurable synthetic
+multi-root DAG; CI guards the 100-image deep-leaf case against algorithmic regressions.
 
 ## Reference policy
 

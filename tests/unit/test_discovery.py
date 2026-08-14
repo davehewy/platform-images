@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from platform_images.discovery import discover_targets, valid_target_name
+from platform_images.discovery import discover_targets, inspect_targets, valid_target_name
 
 
 def test_discovers_directories_without_registration(
@@ -41,6 +41,43 @@ def test_discovers_targets_below_a_configurable_nested_root(
     assert list(targets) == ["api"]
     assert targets["api"].context == target
     assert targets["api"].dockerfile == target / "Containerfile"
+
+
+def test_discovers_targets_across_multiple_roots(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory({})
+    base = root / "containers" / "shared" / "base"
+    api = root / "services" / "api" / "container" / "api"
+    base.mkdir(parents=True)
+    api.mkdir(parents=True)
+    (base / "Containerfile").write_text("FROM scratch\n", encoding="utf-8")
+    (api / "Dockerfile").write_text("FROM base\n", encoding="utf-8")
+
+    discovery = inspect_targets(
+        root,
+        ("services/api/container", "containers/shared"),
+    )
+
+    assert list(discovery.targets) == ["api", "base"]
+    assert discovery.targets["api"].context == api
+    assert discovery.targets["base"].context == base
+    assert not discovery.missing_roots
+
+
+def test_inspection_preserves_duplicate_entries_across_roots(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory({})
+    for discovery_root in ("containers/team-a", "containers/team-b"):
+        target = root / discovery_root / "api"
+        target.mkdir(parents=True)
+        (target / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+
+    discovery = inspect_targets(root, ("containers/team-a", "containers/team-b"))
+
+    assert list(discovery.targets) == ["api"]
+    assert [entry.name for entry in discovery.entries] == ["api", "api"]
 
 
 def test_target_name_rules() -> None:

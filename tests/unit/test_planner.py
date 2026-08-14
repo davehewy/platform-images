@@ -9,7 +9,7 @@ from platform_images.changes import map_changes
 from platform_images.config import RepositoryConfig
 from platform_images.discovery import discover_targets
 from platform_images.errors import MissingStableImageError
-from platform_images.graph import build_graph
+from platform_images.graph import ImageGraph, build_graph
 from platform_images.models import BuildMode, ChangedPath
 from platform_images.planner import affected_reasons, change_plan, local_plan
 from platform_images.registry import StaticRegistryClient
@@ -47,6 +47,50 @@ def test_no_deps_keeps_input_binding_but_not_need(
     assert [target.name for target in plan.targets] == ["curl"]
     assert plan.targets[0].needs == ()
     assert plan.targets[0].input_refs["base"].endswith("/base:dev")
+
+
+def test_hundred_image_leaf_plan_computes_upstream_closure_once(
+    repository_factory: Callable[[dict[str, str]], Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    images = {"image-000": "FROM alpine\n"}
+    for index in range(1, 100):
+        images[f"image-{index:03d}"] = f"FROM image-{index - 1:03d}\n"
+    root = repository_factory(images)
+    config, graph = state(root)
+    closure_calls = 0
+    original = ImageGraph.upstream_closure
+
+    def counted_closure(instance: ImageGraph, targets: set[str] | frozenset[str]) -> frozenset[str]:
+        nonlocal closure_calls
+        closure_calls += 1
+        return original(instance, targets)
+
+    monkeypatch.setattr(ImageGraph, "upstream_closure", counted_closure)
+
+    plan = local_plan(graph, config, frozenset({"image-099"}))
+
+    assert closure_calls == 1
+    assert len(plan.targets) == 100
+    assert plan.targets[0].reasons == ("dependency-of:image-099",)
+    assert plan.targets[-1].reasons == ("selected",)
+
+
+def test_shared_dependency_reasons_include_every_selected_consumer(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory(
+        {
+            "base": "FROM alpine\n",
+            "api": "FROM base\n",
+            "worker": "FROM base\n",
+        }
+    )
+    config, graph = state(root)
+
+    plan = local_plan(graph, config, frozenset({"worker", "api"}))
+
+    base = next(target for target in plan.targets if target.name == "base")
+    assert base.reasons == ("dependency-of:api", "dependency-of:worker")
 
 
 def test_changed_base_affects_all_downstream_with_in_plan_needs(

@@ -78,6 +78,16 @@ def test_github_actions_are_immutable_and_ci_gates_release() -> None:
     assert "platform-images-containerd" in integration_script
     assert "buildctl debug workers" in integration_script
 
+    quality = ci["jobs"]["quality"]  # type: ignore[index]
+    benchmark_step = next(
+        step
+        for step in quality["steps"]  # type: ignore[index]
+        if step.get("name") == "Guard 100-image graph planning performance"
+    )
+    assert "scripts/benchmark-graph.py" in benchmark_step["run"]
+    assert "--images 100" in benchmark_step["run"]
+    assert "--max-leaf-plan-ms 50" in benchmark_step["run"]
+
 
 def test_release_workflow_builds_all_supported_standalone_platforms() -> None:
     release = load_workflow("release.yml")

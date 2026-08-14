@@ -21,7 +21,6 @@ from platform_images.changes import (
     validate_removed_references,
 )
 from platform_images.config import RepositoryConfig
-from platform_images.discovery import discover_targets
 from platform_images.errors import PlatformImagesError
 from platform_images.models import (
     BuildBackend,
@@ -435,18 +434,16 @@ def _create_plan(
 def _run(arguments: argparse.Namespace, cwd: Path | None, environment: Mapping[str, str]) -> int:
     root = _root(arguments, cwd)
     config = RepositoryConfig.load(root)
-    targets = discover_targets(root, config.discovery.root)
-
-    if arguments.command == "list":
-        print("\n".join(sorted(targets)))
-        return 0
-
     report = validate_repository(config)
     if arguments.command == "validate":
         print(_render_validation(report, arguments.format))
         return 0 if report.valid else 1
     _require_valid(report)
     graph = report.graph
+
+    if arguments.command == "list":
+        print("\n".join(sorted(graph.targets)))
+        return 0
 
     if arguments.command == "show":
         if arguments.name not in graph.targets:

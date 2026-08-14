@@ -13,8 +13,12 @@ every commit message, and unit tests before pushes. Run the complete local gate 
 ```bash
 uv run --locked --extra dev pre-commit run --all-files
 uv run --locked --extra dev pytest
+uv run --locked python scripts/benchmark-graph.py --images 100 --iterations 25
 uv build
 ```
+
+The graph benchmark synthesizes a multi-root, 100-image DAG. CI applies a generous deep-leaf
+planning ceiling to catch complexity regressions; use `--json` for comparable local measurements.
 
 Use Conventional Commits because release versions and changelogs are derived from them. Commitizen
 can prompt for a valid message:
