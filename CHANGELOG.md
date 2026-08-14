@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.13.0 (2026-08-14)
+
+### Bug Fixes
+
+- **build**: Bind argument image sources across backends
+  ([`7b3f100`](https://github.com/davehewy/platform-images/commit/7b3f10038e32b62174d3ddd7bdf5cf7175a22485))
+
+### Features
+
+- **registry**: Support generic OCI providers
+  ([`f3f8a5c`](https://github.com/davehewy/platform-images/commit/f3f8a5c64d7c6d4762ee917f17fa2f02afa7daaa))
+
+
 ## v0.12.0 (2026-08-14)
 
 ### Features
