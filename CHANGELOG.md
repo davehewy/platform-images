@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.9.0 (2026-08-14)
+
+### Features
+
+- **cli**: Add initialization and version commands
+  ([`3347f47`](https://github.com/davehewy/platform-images/commit/3347f4798d9711a640ef6ab88ff22be95ffcd587))
+
+
 ## v0.8.0 (2026-08-14)
 
 ### Features
