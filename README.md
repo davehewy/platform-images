@@ -36,10 +36,18 @@ their **build-time** dependency graph, maps a Git diff onto that graph, and foll
 downstream. It can render dynamic GitLab child-pipeline jobs or generate a complete GitHub Actions
 workflow. Docker Buildx, Podman, Buildah, and nerdctl/BuildKit are supported explicitly. Every
 build receives exact image references, and a default-branch pipeline promotes the affected graph
-to stable tags only after the complete graph build succeeds.
+to stable tags only after the complete graph build succeeds. The pipeline also publishes a
+commit-scoped manifest that tells later test, deployment, and release jobs exactly which immutable
+image digest each target produced.
 
 There is no second image catalogue or hand-maintained CI dependency list. The Dockerfiles or
 Containerfiles and Git history remain the source of truth.
+
+The intended delivery path is equally small: CI builds a commit once, publishes
+`image-build-manifest.json`, and every later job reads the new image's `@sha256` reference from that
+file. When the commit is ready to release, `promote-manifest` gives those same tested bytes a
+semantic tag such as `v1.2.3`; it never rebuilds them. See
+[From commit build to semantic release](#from-commit-build-to-semantic-release).
 
 The inferred structure is a **directed acyclic graph (DAG)**. A dependency edge records that one
 target consumes another; validation rejects any directed cycle and prints its complete path before
@@ -54,6 +62,7 @@ before consumers, while unrelated nodes remain parallelizable.
 - [The checked-in example](#the-checked-in-example)
 - [Demonstration](#demonstration)
 - [Worked examples](#worked-examples)
+- [From commit build to semantic release](#from-commit-build-to-semantic-release)
 - [Configuration capabilities](#configuration-capabilities)
 - [Container backend compatibility](docs/container-backends.md)
 - [Recommended adoption flow](#recommended-adoption-flow)
@@ -80,6 +89,8 @@ For a platform or DevOps team, it solves:
 - executing the same exact-reference build contract with Docker Buildx, Podman, Buildah, or
   nerdctl/BuildKit;
 - using unique merge-request and commit tags, with graph-wide stable promotion on `main`;
+- publishing a verified commit-to-image manifest for downstream test, deployment, and release jobs;
+- promoting the already-tested digest to a semantic version without rebuilding it;
 - making retries safe by verifying image identity before reusing an immutable output tag; and
 - failing early on cycles, missing targets, ambiguous short image names, unsafe paths, and malformed
   Dockerfiles or Containerfiles.
@@ -104,7 +115,7 @@ Install a specific version or choose another destination with environment variab
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/davehewy/platform-images/main/scripts/install.sh |
-  PLATFORM_IMAGES_VERSION=0.7.0 PLATFORM_IMAGES_INSTALL_DIR=/usr/local/bin sh
+  PLATFORM_IMAGES_VERSION=0.8.0 PLATFORM_IMAGES_INSTALL_DIR=/usr/local/bin sh
 ```
 
 On Windows, run this in PowerShell. It verifies the Windows archive, installs `platform.exe` below
@@ -121,12 +132,12 @@ Each [GitHub release](https://github.com/davehewy/platform-images/releases) prov
 
 | System | Architecture | Release asset |
 | --- | --- | --- |
-| GNU/Linux | AMD64 / x86_64 | `platform-images-v0.7.0-linux-amd64.tar.gz` |
-| GNU/Linux | ARM64 / AArch64 | `platform-images-v0.7.0-linux-arm64.tar.gz` |
-| macOS / Darwin | Intel AMD64 | `platform-images-v0.7.0-darwin-amd64.tar.gz` |
-| macOS / Darwin | Apple Silicon ARM64 | `platform-images-v0.7.0-darwin-arm64.tar.gz` |
-| Windows | AMD64 / x86_64 | `platform-images-v0.7.0-windows-amd64.zip` |
-| Windows | ARM64 | `platform-images-v0.7.0-windows-arm64.zip` |
+| GNU/Linux | AMD64 / x86_64 | `platform-images-v0.8.0-linux-amd64.tar.gz` |
+| GNU/Linux | ARM64 / AArch64 | `platform-images-v0.8.0-linux-arm64.tar.gz` |
+| macOS / Darwin | Intel AMD64 | `platform-images-v0.8.0-darwin-amd64.tar.gz` |
+| macOS / Darwin | Apple Silicon ARM64 | `platform-images-v0.8.0-darwin-arm64.tar.gz` |
+| Windows | AMD64 / x86_64 | `platform-images-v0.8.0-windows-amd64.zip` |
+| Windows | ARM64 | `platform-images-v0.8.0-windows-arm64.zip` |
 
 Every archive name contains its exact release version, so downloads from different releases remain
 self-identifying when stored together. Each archive contains the native `platform` executable,
@@ -147,7 +158,7 @@ If Python 3.12 is already part of the team's toolchain, `uv` can install an isol
 
 ```bash
 uv tool install --python 3.12 \
-  "git+https://github.com/davehewy/platform-images.git@v0.7.0"
+  "git+https://github.com/davehewy/platform-images.git@v0.8.0"
 ```
 
 The universal `platform_images-<version>-py3-none-any.whl` and conventional Python source
@@ -430,23 +441,41 @@ generate-image-pipeline:
 For the `base -> curl` merge-request plan, the generated portion is equivalent to:
 
 ```yaml
-stages: [build]
+stages: [build, manifest, consume]
 
 image_base:
   extends: .image-build
   script:
-    - platform images ci-build base --output-ref <registry>/platform-images/base:ci-812-<sha>
+    - platform images ci-build base --output-ref <registry>/platform-images/base:ci-812-<sha> --result-file image-results/base.json
+  artifacts:
+    paths: [image-results/base.json]
 
 image_curl:
   extends: .image-build
   needs: [image_base]
   script:
-    - platform images ci-build curl --output-ref <registry>/platform-images/curl:ci-812-<sha> --input-ref base=<registry>/platform-images/base:ci-812-<sha>
+    - platform images ci-build curl --output-ref <registry>/platform-images/curl:ci-812-<sha> --input-ref base=<registry>/platform-images/base:ci-812-<sha> --result-file image-results/curl.json
+  artifacts:
+    paths: [image-results/curl.json]
+
+publish_image_manifest:
+  stage: manifest
+  script:
+    - platform images build-manifest image-results --mode merge_request --commit-sha <sha> --expected-target base --expected-target curl --output image-build-manifest.json
+  artifacts:
+    paths: [image-build-manifest.json]
 ```
 
 The `needs` edge is derived from the Dockerfile. Because every job pushes its unique output before
 completion, `image_curl` can run on a different GitLab runner with no shared container-engine image
-store.
+store. The later manifest stage waits for the complete build stage and receives every result
+artifact without adding a `needs` entry for every image, so a wide 100-image graph does not run into
+GitLab's per-job dependency limit.
+
+The generated stage list also includes `consume`. Define project-specific scan, integration-test,
+or review-deploy jobs in the locally included GitLab template, give them `stage: consume`, and use
+`needs: [{job: publish_image_manifest, artifacts: true}]`. Default-branch `main` promotion waits for
+those jobs rather than bypassing them.
 
 ### Worked example 6: generate a GitHub Actions workflow
 
@@ -463,14 +492,15 @@ For `base -> curl`, the workflow has two static build layers. The planning job c
 affected set once and emits a dynamic matrix for each layer:
 
 ```text
-validate -> plan -> image_layer_0 [base] -> image_layer_1 [curl] -> promote
+validate -> plan -> image_layer_0 [base] -> image_layer_1 [curl] -> manifest -> promote
 ```
 
 Independent targets in the same layer run in parallel. A changed leaf with no rebuilt parent moves
 into the first runtime layer and consumes its unchanged parent by stable digest. Empty layers use a
 no-op sentinel because GitHub rejects an empty matrix. The authoritative JSON plan travels between
 jobs as an artifact, and each matrix entry reloads and validates that plan before building its exact
-target.
+target. Every matrix entry uploads its digest result; `manifest` verifies those results against the
+plan and publishes `image-build-manifest-<commit>` for later jobs.
 
 GitHub job dependencies are part of the checked-in workflow definition, so they cannot be invented
 after a run starts. The generator solves that constraint by creating enough static layers for the
@@ -515,14 +545,15 @@ It also adds one final job:
 ```yaml
 promote_main:
   stage: promote
-  needs: [image_base, image_curl]
   script:
     - platform images promote --source <registry>/platform-images/base:sha-<sha> --destination <registry>/platform-images/base:main
     - platform images promote --source <registry>/platform-images/curl:sha-<sha> --destination <registry>/platform-images/curl:main
 ```
 
-If either build fails, promotion never starts. Consumers therefore do not observe a half-promoted
-set where `base:main` is new but `curl:main` is old.
+If either build or manifest verification fails, promotion never starts. Registry updates across
+several repositories are not transactional, however, so a network failure during promotion can
+still update only some mutable aliases. Deployments that require a coherent set should consume the
+digest-pinned manifest rather than several moving `main` tags.
 
 ### Worked example 8: no image-related change
 
@@ -534,14 +565,18 @@ platform images affected --base "$BASE_SHA" --head HEAD
 ```
 
 GitLab will not accept a child pipeline with no runnable jobs, so the renderer emits a successful
-no-op job:
+manifest job. It records the commit and an empty `images` object, which is an explicit, useful
+answer for downstream automation:
 
 ```yaml
-stages: [build]
-no_image_changes:
-  stage: build
+stages: [build, manifest, consume]
+publish_image_manifest:
+  stage: manifest
   script:
     - echo "No container images are affected."
+    - platform images build-manifest --mode merge_request --commit-sha <sha> --output image-build-manifest.json
+  artifacts:
+    paths: [image-build-manifest.json]
 ```
 
 The parent pipeline remains structurally identical whether zero, one, or hundreds of images are
@@ -726,6 +761,137 @@ A change beneath `services/payments/container-images/api/` selects only `api`; a
 target names and inferred edges are global. Consequently, defining `api` beneath two roots is an
 error with both paths reported, as is configuring roots that overlap. Those checks prevent a Git
 path from binding to one target while a Dockerfile reference binds to another.
+
+## From commit build to semantic release
+
+The recommended process is **build once, test by digest, promote the same digest**:
+
+```text
+Git commit
+  -> affected DAG plan
+  -> commit-addressed build and registry push
+  -> image-build-manifest.json
+  -> tests / review deployment use @sha256
+  -> release automation promotes @sha256 to :v1.2.3
+```
+
+Do not rebuild an image after deciding it passed. A second build of the same source can differ
+because an external base, package index, timestamp, or build service changed. The registry digest
+is the identity of the bytes that were actually tested; the Git SHA identifies their source. The
+manifest joins those two identities.
+
+### What every successful pipeline publishes
+
+Every generated build job writes a small result artifact. The final manifest job requires exactly
+one result for every planned target and verifies the commit, project source, tag/digest pairing,
+immutable reference, and dependency inputs. GitHub additionally reloads the authoritative plan and
+checks every result against it; GitLab's result-producing commands are rendered directly from that
+plan. GitHub publishes an artifact named `image-build-manifest-<commit>`; GitLab's
+`publish_image_manifest` job publishes the same `image-build-manifest.json` file, including for a
+no-change plan.
+
+A two-image manifest looks like this (digests shortened here only for readability):
+
+```json
+{
+  "schema_version": 1,
+  "mode": "default_branch",
+  "base_sha": "<previous-commit>",
+  "commit_sha": "0123456789abcdef0123456789abcdef01234567",
+  "source": "https://github.com/acme/containers",
+  "images": {
+    "base": {
+      "reference": "registry.example/acme/base:sha-0123456789abcdef0123456789abcdef01234567",
+      "digest": "sha256:<base-digest>",
+      "immutable_reference": "registry.example/acme/base@sha256:<base-digest>",
+      "input_references": {}
+    },
+    "curl": {
+      "reference": "registry.example/acme/curl:sha-0123456789abcdef0123456789abcdef01234567",
+      "digest": "sha256:<curl-digest>",
+      "immutable_reference": "registry.example/acme/curl@sha256:<curl-digest>",
+      "input_references": {
+        "base": "registry.example/acme/base:sha-0123456789abcdef0123456789abcdef01234567"
+      }
+    }
+  }
+}
+```
+
+The references have deliberately different jobs:
+
+| Identifier | Meaning | Recommended use |
+| --- | --- | --- |
+| `:ci-<pipeline>-<commit>` | Isolated merge-request output. | Review environments and integration tests; never release it. |
+| `:sha-<commit>` | Human-searchable default-branch build identity. | Retry, audit, and locating a commit's output. Treat it as immutable. |
+| `@sha256:<digest>` | Immutable registry content identity. | Tests, deployments, provenance records, and promotion sources. This is the safest handoff. |
+| `:v1.2.3` | Human semantic release name for an already-tested digest. | Release configuration and user-facing documentation. Make version tags immutable in the registry. |
+| `:main` | Moving convenience channel. | Development consumers that deliberately want the latest successful default-branch result. Do not use it as release evidence. |
+
+### Use a newly built image in the next job
+
+Download the manifest artifact, select the logical target, and fail if it is absent:
+
+```bash
+IMAGE_NAME=curl
+IMAGE_REF="$(jq -er --arg name "$IMAGE_NAME" \
+  '.images[$name].immutable_reference' image-build-manifest.json)"
+
+docker pull "$IMAGE_REF"
+docker run --rm "$IMAGE_REF" --version
+```
+
+Podman, Buildah, and nerdctl accept the same digest-pinned registry reference. A deployment job can
+write `IMAGE_REF` to a Helm value, Kustomize image override, Terraform input, or deployment API.
+Record the full digest in the deployed revision so rollback and incident response do not depend on
+where a mutable tag points later.
+
+The manifest contains only the affected build set. That is normally what a test or deployment job
+wants: if `curl` changed, use its new digest; if it did not, do not redeploy it. An empty `images`
+object means the controller deliberately found no image work—it is not a missing artifact.
+
+### Turn a tested commit into a semantic container release
+
+Let the versioning tool calculate a version only after the commit build and required tests pass.
+Then authenticate the chosen registry transport and promote from the manifest:
+
+```bash
+RELEASE_TAG=v1.2.3
+
+platform images registry-login --registry-transport docker
+platform images promote-manifest image-build-manifest.json \
+  --tag "$RELEASE_TAG" \
+  --expected-commit "$CI_COMMIT_SHA" \
+  --registry-transport docker
+```
+
+`promote-manifest` pulls each `@sha256` source, applies the semantic destination tag in the same
+image repository, and pushes it. It refuses a merge-request manifest, a manifest for another
+commit, an invalid container tag, a missing selected image, or a manifest whose digest fields are
+internally inconsistent. Use repeated `--image <name>` options when a release should contain only
+specific images; omit them to promote every image in the manifest.
+
+Two release models are reasonable:
+
+- **Changed-image releases:** an ordinary default-branch manifest contains only changed images and
+  their affected consumers. Promote those entries. This is efficient and works well when each
+  image has an independent release history.
+- **Coordinated repository releases:** if `v1.2.3` must exist for every image, make the release
+  candidate pipeline use `platform images plan --ci --all` (or GitHub's generated `rebuild_all`
+  input), test that full manifest, and then promote all of it. Do not assume an ordinary partial
+  manifest represents an unchanged image.
+
+If semantic-release runs in a later workflow or pipeline, retrieve the manifest artifact for the
+release commit—not merely the newest successful run—and pass that SHA through `--expected-commit`.
+Retain manifest artifacts and commit-addressed registry outputs for at least the release and
+rollback window. If the artifact cannot be found, fail the release rather than silently rebuilding
+or using `main`.
+
+Promotion across multiple image repositories is gated but not transactionally atomic: all builds
+and manifest verification finish before it starts, but a registry or network failure can interrupt
+the sequence. Consumers that must roll out a coherent multi-image set should treat the manifest as
+the release bill of materials and deploy all `@sha256` values from it. Semantic tags and `main` are
+useful names; the manifest is the exact set.
 
 ## Configuration capabilities
 
@@ -918,8 +1084,12 @@ over stdin. Use the organisation's short-lived workload identity for AWS authent
 7. Run one `--ci --all` default-branch bootstrap to populate stable tags.
 8. Let ordinary merge-request and default-branch pipelines use `--ci` to calculate the minimal
    rebuild set.
-9. Use the JSON graph and plan artifacts during review or incident diagnosis to explain exactly why
-   each image was selected and which dependency digest it consumed.
+9. Make test and deployment jobs download `image-build-manifest.json` and use each target's
+   `immutable_reference`, rather than reconstructing a tag or pulling `main`.
+10. If container images have semantic releases, retain the default-branch manifest, calculate the
+    version after tests, and use `promote-manifest --expected-commit` to tag those exact digests.
+11. Use the JSON graph, plan, and manifest artifacts during review or incident diagnosis to explain
+    why each image was selected, what it consumed, and which bytes the commit produced.
 
 ## Command guide
 
@@ -938,12 +1108,14 @@ over stdin. Use the organisation's short-lived workload identity for AWS authent
 | `platform images plan --ci --all` | Force a complete CI bootstrap or recovery plan. |
 | `platform images render-plan image-plan.json --format gitlab` | Validate and render the persisted plan into child-pipeline YAML. |
 | `platform images generate-workflow github [--builder <name>] [--registry-transport <name>] [--output <path>]` | Generate a complete dependency-layered GitHub Actions workflow. |
-| `platform images ci-build ... [--builder <name>] [--registry-transport <name>]` | Execute one CI target with exact input/output references; normally called only by generated jobs. |
-| `platform images build-plan-target <plan> <name>` | Strictly reload a persisted plan and build its named target; used by GitHub matrix jobs. |
+| `platform images ci-build ... [--result-file <path>] [--builder <name>] [--registry-transport <name>]` | Execute one CI target with exact input/output references and optionally persist its digest result; normally called only by generated jobs. |
+| `platform images build-plan-target <plan> <name> [--result-file <path>]` | Strictly reload a persisted plan, build its named target, and optionally persist its result; used by GitHub matrix jobs. |
+| `platform images build-manifest <results...> --plan <plan> --output <path>` | Verify per-image results and publish the commit-to-image digest manifest; generated CI calls this automatically. |
 | `platform images github-matrix <plan> --max-layers <n>` | Turn a persisted plan into dependency-safe GitHub matrix outputs; used by generated workflows. |
 | `platform images registry-login [--registry-transport <name>]` | Authenticate the selected transport to ECR without exposing the token. |
 | `platform images promote ... [--registry-transport <name>]` | Move a successfully built immutable output to a stable alias. |
 | `platform images promote-plan <plan> [--registry-transport <name>]` | Promote a complete default-branch plan only after its generated build graph succeeds. |
+| `platform images promote-manifest <manifest> --tag <version> --expected-commit <sha>` | Promote the exact digest-pinned outputs of a tested default-branch commit to a semantic version without rebuilding. Repeat `--image` to select entries. |
 
 `<name>` for builders and transports is one of `docker`, `podman`, `buildah`, or `nerdctl`.
 `--engine <name>` remains the concise compatibility form when both axes should match.
@@ -962,9 +1134,11 @@ output tag and inspects identity
 labels for target, commit, source, and dependency references. A matching image is reused by digest;
 a mismatched immutable tag fails as a collision.
 
-Merge-request plans never promote stable tags. Default-branch plans add a single promotion job that
-needs every selected build. Removed targets are reported but are not deleted from ECR; lifecycle and
-deletion policy remain explicit infrastructure responsibilities.
+Every successful plan publishes a verified manifest, even when its affected set is empty. That is
+the stable interface for later tests, deployments, and releases. Merge-request plans never promote
+stable or semantic tags. Default-branch promotion runs only after manifest verification (and, in
+GitLab, the project-defined `consume` stage). Removed targets are reported but are not deleted from
+the registry; lifecycle and deletion policy remain explicit infrastructure responsibilities.
 
 See [architecture](docs/architecture.md), [adding an image](docs/adding-an-image.md),
 [GitHub Actions](docs/github-actions.md), [GitLab CI](docs/gitlab-ci.md),

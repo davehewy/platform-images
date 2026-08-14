@@ -22,7 +22,7 @@ would allow a consumer to race its newly rebuilt parent. The generated workflow 
 one static job per maximum graph depth:
 
 ```text
-validate -> plan -> image_layer_0 -> image_layer_1 -> ... -> promote
+validate -> plan -> image_layer_0 -> image_layer_1 -> ... -> manifest -> promote
 ```
 
 At runtime, `platform images github-matrix` groups only the affected plan into build-safe waves.
@@ -48,13 +48,51 @@ The workflow contains:
 - `plan`, which checks out full history, calculates `image-plan.json` once, emits matrices, and
   uploads the plan as a run-scoped artifact;
 - `image_layer_<n>`, a dynamic matrix in which each entry downloads and strictly validates the
-  authoritative plan before building one exact target; and
-- `promote`, which runs only for a default-branch plan and only after the last dependency layer has
+  authoritative plan before building one exact target and uploading its immutable result;
+- `manifest`, which verifies all target results against the plan and uploads
+  `image-build-manifest-<commit>`; and
+- `promote`, which runs only for a default-branch plan and only after manifest verification has
   succeeded.
 
 The plan artifact contains exact output tags and exact local dependency inputs. Build jobs push
-before completing, so separate runners do not need a shared container image store. Promotion
-is graph-wide: no affected `main` alias changes until every affected image is available.
+before completing, so separate runners do not need a shared container image store. Each result
+records the pushed digest; the manifest maps the source commit to every built target's tag,
+`@sha256` reference, and inputs. Promotion does not start until every affected image is available
+and the complete result set is verified. Multi-repository registry updates are not transactional,
+so use the digest-pinned manifest when a deployment needs an exact image set.
+
+## Test, deploy, or release the newly built images
+
+The manifest is the handoff contract. Download `image-build-manifest-<commit>`, then select a target
+by logical name:
+
+```bash
+IMAGE_NAME=api
+IMAGE_REF="$(jq -er --arg name "$IMAGE_NAME" \
+  '.images[$name].immutable_reference' image-build-manifest.json)"
+docker run --rm "$IMAGE_REF" ./smoke-test
+```
+
+A later workflow must select the successful **Container images** run whose `head_sha` equals the
+commit being tested or released. Do not download an artifact from merely the latest default-branch
+run. Keep `actions: read` scoped to that lookup, verify the manifest with the expected commit, and
+pass the digest to the deployment system.
+
+Once required tests pass, semantic-release, Release Please, Changesets, or another versioning step
+may calculate `v1.2.3`. Authenticate the registry transport and promote the tested bytes:
+
+```bash
+platform images promote-manifest image-build-manifest.json \
+  --tag "$RELEASE_TAG" \
+  --expected-commit "$GITHUB_SHA" \
+  --registry-transport docker
+```
+
+This command accepts only a default-branch manifest and uses each recorded `@sha256` source; it
+does not rebuild. Use `--image api` to release one manifest entry, or omit `--image` to release the
+whole affected set. For a coordinated version that must exist on every image, dispatch the build
+workflow with `rebuild_all` first and release that full manifest. See the
+[complete lifecycle](../README.md#from-commit-build-to-semantic-release).
 
 ## Required repository variables
 

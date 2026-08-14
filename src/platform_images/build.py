@@ -187,14 +187,26 @@ def _created_label(environment: Mapping[str, str]) -> str:
     return moment.isoformat().replace("+00:00", "Z")
 
 
-def _result(target_name: str, output_ref: str, digest: str) -> dict[str, str]:
+def _result(
+    target_name: str,
+    output_ref: str,
+    digest: str,
+    *,
+    commit_sha: str,
+    source: str,
+    input_refs: Mapping[str, str],
+) -> dict[str, object]:
     if _valid_digest(digest) is None:
         raise PlatformImagesError(f"container tooling returned an invalid image digest: {digest!r}")
     return {
+        "schema_version": 1,
         "target": target_name,
+        "commit_sha": commit_sha,
+        "source": source,
         "reference": output_ref,
         "digest": digest,
         "immutable_reference": immutable_reference(output_ref, digest),
+        "input_references": dict(sorted(input_refs.items())),
     }
 
 
@@ -249,10 +261,13 @@ def _existing_ci_result(
     target_name: str,
     output_ref: str,
     identity_labels: Mapping[str, str],
+    commit_sha: str,
+    source: str,
+    input_refs: Mapping[str, str],
     root: Path,
     transport: RegistryTransport,
     required: bool = False,
-) -> dict[str, str] | None:
+) -> dict[str, object] | None:
     executable = transport.value
     try:
         process.run([executable, "pull", output_ref], cwd=root, capture_output=True)
@@ -281,7 +296,14 @@ def _existing_ci_result(
             f"immutable output tag collision for {output_ref}; identity label mismatch: "
             + ", ".join(mismatches)
         )
-    return _result(target_name, output_ref, _inspect_digest(image))
+    return _result(
+        target_name,
+        output_ref,
+        _inspect_digest(image),
+        commit_sha=commit_sha,
+        source=source,
+        input_refs=input_refs,
+    )
 
 
 def execute_ci_build(
@@ -296,7 +318,7 @@ def execute_ci_build(
     builder: BuildBackend | None = None,
     registry_transport: RegistryTransport | None = None,
     engine: BuildBackend | None = None,
-) -> dict[str, str]:
+) -> dict[str, object]:
     if builder is not None and engine is not None and builder is not engine:
         raise ValueError("builder and legacy engine select different backends")
     explicitly_selected = builder or engine
@@ -351,6 +373,9 @@ def execute_ci_build(
         target_name=target_name,
         output_ref=output_ref,
         identity_labels=identity_labels,
+        commit_sha=revision,
+        source=source,
+        input_refs=input_refs,
         root=root,
         transport=registry_transport,
     ):
@@ -391,6 +416,9 @@ def execute_ci_build(
                 target_name=target_name,
                 output_ref=output_ref,
                 identity_labels=identity_labels,
+                commit_sha=revision,
+                source=source,
+                input_refs=input_refs,
                 root=root,
                 transport=registry_transport,
                 required=True,
@@ -416,7 +444,14 @@ def execute_ci_build(
                 ) from exc
     if _valid_digest(digest) is None:
         raise PlatformImagesError(f"container engine returned an invalid image digest: {digest!r}")
-    return _result(target_name, output_ref, digest)
+    return _result(
+        target_name,
+        output_ref,
+        digest,
+        commit_sha=revision,
+        source=source,
+        input_refs=input_refs,
+    )
 
 
 def parse_input_references(values: list[str]) -> dict[str, str]:
@@ -433,5 +468,5 @@ def parse_input_references(values: list[str]) -> dict[str, str]:
     return result
 
 
-def result_json(result: Mapping[str, str]) -> str:
+def result_json(result: Mapping[str, object]) -> str:
     return json.dumps(dict(result), sort_keys=True)

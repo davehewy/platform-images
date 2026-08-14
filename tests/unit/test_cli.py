@@ -189,7 +189,9 @@ def test_ci_no_change_generates_noop_child(git_repository: Path, capsys) -> None
         == 0
     )
     output = capsys.readouterr().out
-    assert "no_image_changes:" in output
+    assert "publish_image_manifest:" in output
+    assert 'echo "No container images are affected."' in output
+    assert "image-build-manifest.json" in output
     assert "No container images are affected." in output
 
 
@@ -367,3 +369,116 @@ def test_generate_workflow_refuses_output_outside_repository(
         == 1
     )
     assert "must stay within" in capsys.readouterr().err
+
+
+def test_build_manifest_command_writes_commit_handoff(
+    repository_factory: Callable[[dict[str, str]], Path], capsys
+) -> None:
+    root = repository_factory({"base": "FROM alpine\n"})
+    digest = "sha256:" + "a" * 64
+    results = root / "image-results"
+    results.mkdir()
+    (results / "base.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "target": "base",
+                "commit_sha": "commit",
+                "source": "https://example.com/repository",
+                "reference": "registry.example/platform-images/base:sha-commit",
+                "digest": digest,
+                "immutable_reference": f"registry.example/platform-images/base@{digest}",
+                "input_references": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert (
+        main(
+            [
+                "images",
+                "build-manifest",
+                str(results),
+                "--mode",
+                "default_branch",
+                "--expected-target",
+                "base",
+                "--output",
+                "image-build-manifest.json",
+            ],
+            cwd=root,
+            environment={
+                "CI_COMMIT_SHA": "commit",
+                "CI_PROJECT_URL": "https://example.com/repository",
+            },
+        )
+        == 0
+    )
+    assert capsys.readouterr().out == "image-build-manifest.json\n"
+    manifest = json.loads((root / "image-build-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["images"]["base"]["immutable_reference"].endswith(digest)
+
+
+def test_promote_manifest_command_retags_only_digest_pinned_source(
+    repository_factory: Callable[[dict[str, str]], Path], capsys, monkeypatch
+) -> None:
+    root = repository_factory({"base": "FROM alpine\n"})
+    digest = "sha256:" + "b" * 64
+    manifest = root / "image-build-manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "mode": "default_branch",
+                "base_sha": "before",
+                "commit_sha": "commit",
+                "source": "https://example.com/repository",
+                "images": {
+                    "base": {
+                        "reference": "registry.example/platform-images/base:sha-commit",
+                        "digest": digest,
+                        "immutable_reference": f"registry.example/platform-images/base@{digest}",
+                        "input_references": {},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls: list[tuple[str, str]] = []
+
+    class Registry:
+        def promote(self, source: str, destination: str) -> None:
+            calls.append((source, destination))
+
+    monkeypatch.setattr(
+        "platform_images.cli.ContainerRegistryClient",
+        lambda *args, **kwargs: Registry(),
+    )
+
+    assert (
+        main(
+            [
+                "images",
+                "promote-manifest",
+                str(manifest),
+                "--tag",
+                "v1.2.3",
+                "--expected-commit",
+                "commit",
+                "--registry-transport",
+                "docker",
+            ],
+            cwd=root,
+            environment={},
+        )
+        == 0
+    )
+    assert calls == [
+        (
+            f"registry.example/platform-images/base@{digest}",
+            "registry.example/platform-images/base:v1.2.3",
+        )
+    ]
+    assert json.loads(capsys.readouterr().out)["promoted"][0]["target"] == "base"

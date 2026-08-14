@@ -14,6 +14,8 @@ governed repository. Apply:
 - a lifecycle rule expiring `ci-*` tags after 7 days
 - a lifecycle rule expiring untagged manifests after 1 day
 - the organisation's retention policy for older immutable `sha-*` images
+- release retention for immutable semantic tags such as `v1.2.3` and the commit manifests that
+  prove which digest each version names
 
 Repository creation templates affect repositories created after the template is installed; they do
 not retroactively align existing repositories. Inventory existing `platform-images/*` repositories
@@ -36,6 +38,6 @@ That builds every target under immutable `sha-*` tags and promotes all `main` al
 graph succeeds. Partial merge-request builds that need an upstream image intentionally fail until
 this bootstrap has established a stable digest.
 
-Immutable `ci-*` and `sha-*` tags are retry-safe. A retried job reuses an existing output only when
+Immutable `ci-*`, `sha-*`, and semantic version tags are retry-safe. A retried build job reuses an existing output only when
 its image identity labels match the exact target, commit, project source, and dependency references;
 otherwise the collision fails before a rebuild can overwrite anything.

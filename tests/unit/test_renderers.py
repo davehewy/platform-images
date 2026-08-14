@@ -61,6 +61,11 @@ def test_gitlab_jobs_have_only_direct_needs_and_exact_inputs(
     assert document["image_curl"]["needs"] == ["image_base"]
     command = document["image_curl"]["script"][0]
     assert "--input-ref base=registry.example.com/platform-images/base:ci-123-abc" in command
+    assert "--result-file image-results/curl.json" in command
+    manifest = document["publish_image_manifest"]
+    assert manifest.get("needs") is None
+    assert "--expected-target curl" in manifest["script"][-1]
+    assert manifest["artifacts"]["paths"] == ["image-build-manifest.json"]
 
 
 def test_no_change_pipeline_has_executable_noop(
@@ -70,13 +75,12 @@ def test_no_change_pipeline_has_executable_noop(
     config, _graph = state(root)
     plan = BuildPlan(1, BuildMode.MERGE_REQUEST, "a", "b", (), ())
     document = yaml.safe_load(render_gitlab(plan, config, "registry.example.com"))
-    assert document == {
-        "stages": ["build"],
-        "no_image_changes": {
-            "stage": "build",
-            "script": ['echo "No container images are affected."'],
-        },
-    }
+    assert document["stages"] == ["build", "manifest", "consume"]
+    job = document["publish_image_manifest"]
+    assert job["stage"] == "manifest"
+    assert job["script"][0] == 'echo "No container images are affected."'
+    assert "build-manifest --mode merge_request --commit-sha b" in job["script"][1]
+    assert job["artifacts"]["paths"] == ["image-build-manifest.json"]
 
 
 def test_default_branch_has_one_graph_gated_promotion_job(
@@ -93,10 +97,32 @@ def test_default_branch_has_one_graph_gated_promotion_job(
         pipeline_id="123",
     )
     document = yaml.safe_load(render_gitlab(plan, config, "registry.example.com"))
-    assert document["stages"] == ["build", "promote"]
-    assert document["promote_main"]["needs"] == ["image_base", "image_curl"]
+    assert document["stages"] == ["build", "manifest", "consume", "promote"]
+    assert document["promote_main"].get("needs") is None
     assert len(document["promote_main"]["script"]) == 2
     assert all(":main" in command for command in document["promote_main"]["script"])
+
+
+def test_gitlab_manifest_stage_avoids_a_wide_needs_fan_in(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory({f"image-{index:03d}": "FROM alpine\n" for index in range(100)})
+    config, graph = state(root)
+    plan = all_ci_plan(
+        graph,
+        config,
+        head_sha="abc",
+        mode=BuildMode.DEFAULT_BRANCH,
+        registry="registry.example.com",
+        pipeline_id="123",
+    )
+
+    document = yaml.safe_load(render_gitlab(plan, config, "registry.example.com"))
+
+    manifest = document["publish_image_manifest"]
+    assert manifest.get("needs") is None
+    assert manifest["script"][0].count("--expected-target") == 100
+    assert document["promote_main"].get("needs") is None
 
 
 def test_gitlab_job_names_cannot_collide_for_valid_separators() -> None:
@@ -133,6 +159,7 @@ def test_github_matrices_parallelize_only_dependency_safe_waves(
     assert output[1] == 'layer_0={"include":[{"target":"api"},{"target":"standalone"}]}'
     assert output[3] == 'layer_2={"include":[{"target":"curl"},{"target":"jq"}]}'
     assert output[4] == 'layer_3={"include":[{"target":""}]}'
+    assert output[5] == "has_targets=true"
 
 
 def test_github_matrix_fails_when_checked_in_workflow_is_stale(
@@ -173,10 +200,22 @@ def test_generated_github_workflow_has_static_waves_dynamic_matrices_and_gated_p
     assert jobs["image_layer_1"]["strategy"]["matrix"] == (
         "${{ fromJSON(needs.plan.outputs.layer_1) }}"
     )
-    build_command = jobs["image_layer_1"]["steps"][-1]["run"]
+    build_command = next(
+        step["run"]
+        for step in jobs["image_layer_1"]["steps"]
+        if step.get("name") == "Build and push exact planned target"
+    )
     assert "build-plan-target" in build_command
     assert "--builder docker --registry-transport docker" in build_command
-    assert jobs["promote"]["needs"] == ["plan", "image_layer_1"]
+    assert "--result-file" in build_command
+    assert jobs["manifest"]["needs"] == ["plan", "image_layer_1"]
+    manifest_command = next(
+        step["run"]
+        for step in jobs["manifest"]["steps"]
+        if step.get("name") == "Create verified commit-to-image manifest"
+    )
+    assert "build-manifest image-results --plan" in manifest_command
+    assert jobs["promote"]["needs"] == ["plan", "manifest"]
     assert "default_branch" in jobs["promote"]["if"]
     assert "id-token" in jobs["plan"]["permissions"]
 

@@ -22,6 +22,12 @@ from platform_images.changes import (
 )
 from platform_images.config import RepositoryConfig
 from platform_images.errors import PlatformImagesError
+from platform_images.manifests import (
+    build_manifest_data,
+    load_build_manifest,
+    manifest_promotions,
+    write_json_file,
+)
 from platform_images.models import (
     BuildBackend,
     BuildMode,
@@ -109,6 +115,11 @@ def _parser() -> argparse.ArgumentParser:
     ci_build.add_argument("name")
     ci_build.add_argument("--output-ref", required=True)
     ci_build.add_argument("--input-ref", action="append", default=[])
+    ci_build.add_argument(
+        "--result-file",
+        type=Path,
+        help="write the pushed image identity and digest as JSON",
+    )
     _execution_arguments(ci_build)
 
     registry_login = commands.add_parser("registry-login")
@@ -122,7 +133,53 @@ def _parser() -> argparse.ArgumentParser:
     build_plan_target = commands.add_parser("build-plan-target")
     build_plan_target.add_argument("plan_file", type=Path)
     build_plan_target.add_argument("name")
+    build_plan_target.add_argument(
+        "--result-file",
+        type=Path,
+        help="write the pushed image identity and digest as JSON",
+    )
     _execution_arguments(build_plan_target)
+
+    build_manifest = commands.add_parser(
+        "build-manifest",
+        help="verify build results and publish a commit-to-image manifest",
+    )
+    build_manifest.add_argument(
+        "result_paths",
+        nargs="*",
+        type=Path,
+        help="result JSON files or directories containing them",
+    )
+    build_manifest.add_argument("--plan", type=Path, help="authoritative CI plan to verify")
+    build_manifest.add_argument(
+        "--mode",
+        choices=(BuildMode.MERGE_REQUEST.value, BuildMode.DEFAULT_BRANCH.value),
+    )
+    build_manifest.add_argument("--base-sha")
+    build_manifest.add_argument("--commit-sha")
+    build_manifest.add_argument("--source")
+    build_manifest.add_argument("--expected-target", action="append", default=[])
+    build_manifest.add_argument("--output", type=Path, help="write the manifest instead of stdout")
+
+    promote_manifest = commands.add_parser(
+        "promote-manifest",
+        help="promote tested manifest digests to a release tag without rebuilding",
+    )
+    promote_manifest.add_argument("manifest_file", type=Path)
+    promote_manifest.add_argument(
+        "--tag", required=True, help="destination tag, for example v1.2.3"
+    )
+    promote_manifest.add_argument(
+        "--expected-commit",
+        help="required source commit; defaults to CI_COMMIT_SHA",
+    )
+    promote_manifest.add_argument(
+        "--image",
+        action="append",
+        default=[],
+        help="promote only this image; repeat to select several",
+    )
+    _transport_arguments(promote_manifest)
 
     promote_plan = commands.add_parser("promote-plan")
     promote_plan.add_argument("plan_file", type=Path)
@@ -349,6 +406,16 @@ def _load_plan(path: Path, graph, config: RepositoryConfig) -> BuildPlan:
     return plan
 
 
+def _artifact_path(path: Path, root: Path) -> Path:
+    return path if path.is_absolute() else root / path
+
+
+def _emit_build_result(result: Mapping[str, object], path: Path | None, *, root: Path) -> None:
+    if path is not None:
+        write_json_file(_artifact_path(path, root), result)
+    print(result_json(result))
+
+
 def _create_plan(
     arguments: argparse.Namespace,
     config: RepositoryConfig,
@@ -550,7 +617,7 @@ def _run(arguments: argparse.Namespace, cwd: Path | None, environment: Mapping[s
             builder=builder,
             registry_transport=transport,
         )
-        print(result_json(result))
+        _emit_build_result(result, arguments.result_file, root=root)
         return 0
     if arguments.command == "registry-login":
         registry = environment.get(config.registry.registry_environment_variable)
@@ -600,7 +667,47 @@ def _run(arguments: argparse.Namespace, cwd: Path | None, environment: Mapping[s
             builder=builder,
             registry_transport=transport,
         )
-        print(result_json(result))
+        _emit_build_result(result, arguments.result_file, root=root)
+        return 0
+    if arguments.command == "build-manifest":
+        plan = (
+            _load_plan(_artifact_path(arguments.plan, root), graph, config)
+            if arguments.plan is not None
+            else None
+        )
+        mode = BuildMode(arguments.mode) if arguments.mode is not None else None
+        manifest = build_manifest_data(
+            (_artifact_path(path, root) for path in arguments.result_paths),
+            plan=plan,
+            mode=mode,
+            base_sha=arguments.base_sha,
+            commit_sha=arguments.commit_sha or environment.get("CI_COMMIT_SHA"),
+            source=arguments.source or environment.get("CI_PROJECT_URL"),
+            expected_targets=arguments.expected_target,
+        )
+        if arguments.output is not None:
+            write_json_file(_artifact_path(arguments.output, root), manifest)
+            print(arguments.output)
+        else:
+            print(json.dumps(manifest, indent=2, sort_keys=True))
+        return 0
+    if arguments.command == "promote-manifest":
+        expected_commit = arguments.expected_commit or environment.get("CI_COMMIT_SHA")
+        if not expected_commit:
+            raise PlatformImagesError(
+                "CI_COMMIT_SHA or --expected-commit is required for manifest promotion"
+            )
+        manifest = load_build_manifest(_artifact_path(arguments.manifest_file, root))
+        promotions = manifest_promotions(
+            manifest,
+            arguments.tag,
+            expected_commit=expected_commit,
+            selected_images=arguments.image,
+        )
+        transport = ContainerRegistryClient(root, transport=_transport(arguments, config))
+        for promotion in promotions:
+            transport.promote(promotion["source"], promotion["destination"])
+        print(json.dumps({"commit_sha": expected_commit, "promoted": promotions}, sort_keys=True))
         return 0
     if arguments.command == "promote-plan":
         plan = _load_plan(arguments.plan_file, graph, config)

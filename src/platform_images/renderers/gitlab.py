@@ -22,13 +22,23 @@ def job_name(target: str) -> str:
 
 
 def render_gitlab(plan: BuildPlan, config: RepositoryConfig, registry: str) -> str:
-    document: dict[str, object] = {"stages": ["build"]}
-    if not plan.targets:
-        document["no_image_changes"] = {
-            "stage": "build",
-            "script": ['echo "No container images are affected."'],
-        }
-        return yaml.safe_dump(document, sort_keys=False)
+    manifest_command = [
+        "platform",
+        "images",
+        "build-manifest",
+        *(["image-results"] if plan.targets else []),
+        "--mode",
+        plan.mode.value,
+        "--commit-sha",
+        plan.head_sha,
+    ]
+    if plan.base_sha is not None:
+        manifest_command.extend(["--base-sha", plan.base_sha])
+    for target in plan.targets:
+        manifest_command.extend(["--expected-target", target.name])
+    manifest_command.extend(["--output", "image-build-manifest.json"])
+
+    document: dict[str, object] = {"stages": ["build", "manifest", "consume"]}
 
     for target in plan.targets:
         command = [
@@ -38,19 +48,35 @@ def render_gitlab(plan: BuildPlan, config: RepositoryConfig, registry: str) -> s
             target.name,
             "--output-ref",
             target.output_ref,
+            "--result-file",
+            f"image-results/{target.name}.json",
         ]
         for dependency, reference in sorted(target.input_refs.items()):
             command.extend(["--input-ref", f"{dependency}={reference}"])
         job: dict[str, object] = {
             "extends": ".image-build",
             "script": [shlex.join(command)],
+            "artifacts": {"paths": [f"image-results/{target.name}.json"]},
         }
         if target.needs:
             job["needs"] = [job_name(dependency) for dependency in target.needs]
         document[job_name(target.name)] = job
 
-    if plan.mode is BuildMode.DEFAULT_BRANCH:
-        document["stages"] = ["build", "promote"]
+    document["publish_image_manifest"] = {
+        "extends": ".image-build",
+        "stage": "manifest",
+        "script": [
+            *(['echo "No container images are affected."'] if not plan.targets else []),
+            shlex.join(manifest_command),
+        ],
+        "artifacts": {
+            "name": "image-build-manifest-$CI_COMMIT_SHA",
+            "paths": ["image-build-manifest.json"],
+        },
+    }
+
+    if plan.mode is BuildMode.DEFAULT_BRANCH and plan.targets:
+        document["stages"] = ["build", "manifest", "consume", "promote"]
         policy = ReferencePolicy(config, registry)
         scripts: list[str] = []
         for target in plan.targets:
@@ -70,7 +96,6 @@ def render_gitlab(plan: BuildPlan, config: RepositoryConfig, registry: str) -> s
         document["promote_main"] = {
             "extends": ".image-build",
             "stage": "promote",
-            "needs": [job_name(target.name) for target in plan.targets],
             "script": scripts,
         }
     return yaml.safe_dump(document, sort_keys=False)

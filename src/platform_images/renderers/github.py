@@ -68,6 +68,7 @@ def render_github_outputs(plan: BuildPlan, max_layers: int) -> str:
         include = [{"target": name} for name in names] or [{"target": ""}]
         value = json.dumps({"include": include}, separators=(",", ":"))
         lines.append(f"layer_{index}={value}")
+    lines.append(f"has_targets={'true' if plan.targets else 'false'}")
     return "\n".join(lines)
 
 
@@ -232,6 +233,7 @@ def render_github_workflow(
             },
             "outputs": {
                 "mode": "${{ steps.matrix.outputs.mode }}",
+                "has_targets": "${{ steps.matrix.outputs.has_targets }}",
                 **{
                     f"layer_{index}": f"${{{{ steps.matrix.outputs.layer_{index} }}}}"
                     for index in range(layer_count)
@@ -312,21 +314,81 @@ def render_github_workflow(
                     "name": "Build and push exact planned target",
                     "if": "matrix.target != ''",
                     "run": (
+                        "mkdir -p image-results\n"
                         "platform images build-plan-target .platform-images/image-plan.json "
                         f'"${{{{ matrix.target }}}}" --builder {builder.value} '
-                        f"--registry-transport {registry_transport.value}"
+                        f"--registry-transport {registry_transport.value} "
+                        '--result-file "image-results/${{ matrix.target }}.json"'
                     ),
+                },
+                {
+                    "name": "Upload immutable image result",
+                    "if": "matrix.target != ''",
+                    "uses": UPLOAD_ARTIFACT,
+                    "with": {
+                        "name": (
+                            "image-result-${{ github.run_id }}-${{ github.run_attempt }}-"
+                            "${{ matrix.target }}"
+                        ),
+                        "path": "image-results/${{ matrix.target }}.json",
+                        "if-no-files-found": "error",
+                    },
                 },
             ],
         }
         previous = job_id
 
-    jobs["promote"] = {
-        "name": f"Promote {default_branch} image set",
+    jobs["manifest"] = {
+        "name": "Publish commit image manifest",
         "needs": ["plan", previous],
         "if": (
             "!cancelled() && needs.plan.result == 'success' && "
-            f"needs.{previous}.result == 'success' && "
+            f"needs.{previous}.result == 'success'"
+        ),
+        "runs-on": runner,
+        "timeout-minutes": 10,
+        "env": source_env,
+        "steps": [
+            _checkout_step(),
+            _install_step(),
+            _artifact_download_step(),
+            {
+                "name": "Download immutable image results",
+                "if": "needs.plan.outputs.has_targets == 'true'",
+                "uses": DOWNLOAD_ARTIFACT,
+                "with": {
+                    "pattern": "image-result-${{ github.run_id }}-${{ github.run_attempt }}-*",
+                    "path": "image-results",
+                    "merge-multiple": True,
+                },
+            },
+            {
+                "name": "Create verified commit-to-image manifest",
+                "run": (
+                    "mkdir -p image-results\n"
+                    "platform images build-manifest image-results "
+                    "--plan .platform-images/image-plan.json "
+                    "--output image-build-manifest.json"
+                ),
+            },
+            {
+                "name": "Upload commit image manifest",
+                "uses": UPLOAD_ARTIFACT,
+                "with": {
+                    "name": "image-build-manifest-${{ env.CI_COMMIT_SHA }}",
+                    "path": "image-build-manifest.json",
+                    "if-no-files-found": "error",
+                },
+            },
+        ],
+    }
+
+    jobs["promote"] = {
+        "name": f"Promote {default_branch} image set",
+        "needs": ["plan", "manifest"],
+        "if": (
+            "!cancelled() && needs.plan.result == 'success' && "
+            "needs.manifest.result == 'success' && "
             "needs.plan.outputs.mode == 'default_branch'"
         ),
         "runs-on": runner,

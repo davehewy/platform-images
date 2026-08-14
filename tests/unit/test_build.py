@@ -395,10 +395,16 @@ def test_ci_build_validates_inputs_pushes_and_reads_digest(
     )
     assert runner.commands[2][:3] == ["podman", "push", "--digestfile"]
     assert result == {
+        "schema_version": 1,
         "target": "curl",
+        "commit_sha": "abc",
+        "source": "https://gitlab.example/project",
         "reference": output,
         "digest": PODMAN_DIGEST,
         "immutable_reference": f"registry/platform-images/curl@{PODMAN_DIGEST}",
+        "input_references": {
+            "base": "registry/platform-images/base@sha256:base",
+        },
     }
 
 

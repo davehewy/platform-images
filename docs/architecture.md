@@ -28,12 +28,15 @@ and testable.
    nerdctl calls. Logical dependencies are bound through exact named `docker-image://` or
    `container-image://` contexts.
 9. **GitLab renderer** strictly reloads the saved JSON plan, verifies it against the discovered
-   graph, and safely serializes jobs. Direct dependencies become `needs`; an empty plan becomes a
-   successful no-op job.
+   graph, and safely serializes jobs. Direct dependencies become `needs`; every plan, including an
+   empty one, ends in a commit manifest artifact and exposes a `consume` stage for project tests.
 10. **GitHub renderer** generates static graph-depth jobs whose runtime matrices contain only the
     dependency-safe layers of the affected plan. The saved plan is passed as an artifact and
     strictly revalidated in every matrix build.
-11. **Registry adapter** resolves stable ECR tags in the account and region encoded by the registry
+11. **Manifest verifier** joins per-target results only when their commit, source, output, digest,
+    dependency inputs, and expected target set agree with the plan. The resulting JSON is the
+    downstream and release bill of materials.
+12. **Registry adapter** resolves stable ECR tags in the account and region encoded by the registry
     hostname. Builder capabilities determine direct or local output; transport capabilities own
     authentication, inspection, digest capture, and promotion behind one graph-wide job.
 
@@ -64,10 +67,16 @@ multi-root DAG; CI guards the 100-image deep-leaf case against algorithmic regre
 | Merge request | `<registry>/platform-images/<target>:ci-<pipeline>-<commit>` |
 | Default branch | `<registry>/platform-images/<target>:sha-<full-commit>` |
 | Stable input/alias | `<registry>/platform-images/<target>:main` |
+| Semantic release | `<registry>/platform-images/<target>:v<semver>` |
 
 Dependencies built in the same plan use that plan's unique output. Dependencies outside a partial
 plan resolve `main` through ECR and are injected by immutable digest. A missing stable dependency
 fails the plan; the controller never silently builds unrelated upstream images.
+
+The build result resolves every commit-addressed output to its registry digest. Test and deployment
+jobs consume the manifest's `@sha256` value. A semantic release promotes that same digest to a
+human version tag; it does not execute a second build. Commit and semantic tags should be protected
+as immutable by registry policy, while a channel such as `main` is deliberately movable.
 
 Unqualified image repositories are ambiguous because Docker normally interprets both `FROM base`
 and `FROM alpine` as short registry names. The controller resolves a discovered target as local,
