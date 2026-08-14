@@ -1,8 +1,8 @@
 # Architecture
 
 The controller is intentionally thin. A supported container backend builds, GitHub Actions or
-GitLab schedules, and ECR stores images. The Python package makes repository conventions explicit
-and testable.
+GitLab schedules, and an ECR or OCI Distribution-compatible registry stores images. The Python
+package makes repository conventions explicit and testable.
 
 ## Data flow
 
@@ -12,7 +12,8 @@ and testable.
    Logical target names are global and case-insensitively unique across all roots.
 2. **Identity resolver and parser** map short logical names, qualified references with an exact
    logical basename, canonical published repositories, and configured exceptional aliases onto one
-   target before reading global `ARG` defaults, `FROM`, `COPY`/`ADD --from`, and
+   target before reading configured global `ARG` values, Dockerfile defaults, `FROM`,
+   `COPY`/`ADD --from`, and
    `RUN --mount=from`. Tags and digests do not determine identity, while the exact expanded source
    spelling is retained for build-context replacement. Explicit external exceptions win over
    automatic basename inference; heredoc bodies remain excluded.
@@ -25,7 +26,7 @@ and testable.
 5. **Changes** parses NUL-delimited, rename-aware Git output and maps image paths or global inputs
    to directly changed targets. Controller, lock, configuration, and pipeline paths are mandatory
    global inputs in code, so a configuration edit cannot disable its own rebuild. Deleted targets
-   are reported, never deleted from ECR.
+   are reported, never deleted from the configured registry.
 6. **Affected calculation** follows downstream dependents from directly changed images.
 7. **Planner** topologically orders only the rebuild set and resolves every output, dependency
    input, Dockerfile source-to-exact-image context, reason, and in-plan `needs` edge without
@@ -42,9 +43,11 @@ and testable.
 11. **Manifest verifier** joins per-target results only when their commit, source, output, digest,
     dependency inputs, and expected target set agree with the plan. The resulting JSON is the
     downstream and release bill of materials.
-12. **Registry adapter** resolves stable ECR tags in the account and region encoded by the registry
-    hostname. Builder capabilities determine direct or local output; transport capabilities own
-    authentication, inspection, digest capture, and promotion behind one graph-wide job.
+12. **Registry provider and transport** resolve stable tags without pulling layers. ECR uses the
+    account and region encoded by its hostname; generic OCI uses the Distribution manifest API,
+    including Basic/Bearer challenges and digest-header validation. Builder capabilities determine
+    direct or local output; transport capabilities own authentication, inspection, digest capture,
+    and promotion behind one graph-wide job.
 
 Core graph, change, planning, and rendering code never invokes Git, container tooling, AWS, or the
 registry. Those processes sit behind small injectable adapters so unit tests use recorded inputs.
@@ -80,8 +83,9 @@ multi-root DAG; CI guards the 100-image deep-leaf case against algorithmic regre
 references.
 
 Dependencies built in the same plan use that plan's unique output. Dependencies outside a partial
-plan resolve `main` through ECR and are injected by immutable digest. A missing stable dependency
-fails the plan; the controller never silently builds unrelated upstream images.
+plan resolve `main` through the configured ECR or generic OCI provider and are injected by immutable
+digest. A missing stable dependency fails the plan; the controller never silently builds unrelated
+upstream images.
 
 The build result resolves every commit-addressed output to its registry digest. Test and deployment
 jobs consume the manifest's `@sha256` value. A semantic release promotes that same digest to a

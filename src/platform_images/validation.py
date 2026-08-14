@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -60,6 +61,25 @@ def _manual_mapping_hint(reference: str, target: str) -> str:
         f"repository = {json.dumps(relative)}; "
         f"if it is intentionally external, add external_repositories = "
         f"[{json.dumps(repository)}] under [identity]"
+    )
+
+
+def _build_argument_hint(reference: str) -> str | None:
+    names = sorted(
+        {
+            braced or short
+            for braced, short in re.findall(
+                r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))",
+                reference,
+            )
+        }
+    )
+    if not names:
+        return None
+    examples = ", ".join(f'{name} = "registry.example/team"' for name in names)
+    return (
+        "set deterministic values used by both dependency parsing and builds under "
+        f"[dockerfile.arguments], for example: {examples}"
     )
 
 
@@ -253,6 +273,7 @@ def validate_repository(config: RepositoryConfig) -> ValidationReport:
                         f"unresolved {reference.instruction} reference: {reference.raw}",
                         dockerfile_path,
                         reference.line_number,
+                        _build_argument_hint(reference.raw),
                     )
                 )
         for reference in graph.external_dependencies[target_name]:

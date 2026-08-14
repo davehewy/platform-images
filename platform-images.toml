@@ -3,6 +3,9 @@ namespace = "platform-images"
 registry_environment_variable = "PLATFORM_IMAGES_REGISTRY"
 stable_tag = "main"
 transport = "podman"
+provider = "ecr"
+authentication = "ecr"
+scheme = "https"
 
 [tags]
 ci_prefix = "ci"

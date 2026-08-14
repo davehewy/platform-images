@@ -13,6 +13,9 @@
    `[images.<target>].repository` or a tagless `aliases` entry only when the local and remote names
    differ.
    `platform images validate` prints the exact mapping to add for strong near-matches.
+   If a qualified source is assembled from a global `ARG` without a default, configure its
+   deterministic value under `[dockerfile.arguments]`. The controller uses it for graph parsing and
+   passes the same value to the backend as `--build-arg`, so discovery and execution cannot drift.
    Run builds through `platform images build` or generated CI so those named contexts are present;
    a plain container build command may try to pull the logical name.
    If a new external base uses an unqualified name such as `debian`, add that repository name to
@@ -31,5 +34,6 @@ unless they are intentionally shared and listed as a global controller input.
 
 An internal repository reference whose target does not exist, an identity claimed by multiple
 targets, an unresolved build-time-only `ARG`, or a local dependency cycle fails validation before a
-build plan can be generated. A qualified near-match is reported as a warning and remains external
-until it is mapped; add it to `identity.external_repositories` instead when that is intentional.
+build plan can be generated. The unresolved-ARG error prints the `[dockerfile.arguments]` remedy. A
+qualified near-match is reported as a warning and remains external until it is mapped; add it to
+`identity.external_repositories` instead when that is intentional.

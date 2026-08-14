@@ -12,6 +12,7 @@ from platform_images.backends import default_transport, validate_execution_pair
 from platform_images.build import (
     execute_ci_build,
     execute_local_plan,
+    parse_build_arguments,
     parse_input_references,
     result_json,
 )
@@ -35,6 +36,8 @@ from platform_images.models import (
     BuildMode,
     BuildPlan,
     ChangeSet,
+    RegistryAuthentication,
+    RegistryProvider,
     RegistryTransport,
 )
 from platform_images.planner import (
@@ -48,7 +51,8 @@ from platform_images.references import ReferencePolicy
 from platform_images.registry import (
     ContainerRegistryClient,
     ECRRegistryClient,
-    login_to_ecr,
+    OCIRegistryClient,
+    login_to_registry,
     registry_from_environment_json,
 )
 from platform_images.renderers.github import render_github_outputs, render_github_workflow
@@ -147,6 +151,34 @@ examples:
         "--registry-transport",
         choices=CONTAINER_CLI_CHOICES,
         help="registry client (default: match --builder)",
+    )
+    init.add_argument(
+        "--registry-provider",
+        choices=tuple(provider.value for provider in RegistryProvider),
+        default=RegistryProvider.OCI.value,
+        help="stable-tag registry API (default: oci; use ecr for AWS-native lookup)",
+    )
+    init.add_argument(
+        "--registry-authentication",
+        choices=tuple(authentication.value for authentication in RegistryAuthentication),
+        help="registry login policy (default: credentials for oci, ecr for ecr)",
+    )
+    init.add_argument(
+        "--registry-username-variable",
+        default="PLATFORM_IMAGES_REGISTRY_USERNAME",
+        help="environment variable containing an OCI registry username",
+    )
+    init.add_argument(
+        "--registry-password-variable",
+        default="PLATFORM_IMAGES_REGISTRY_PASSWORD",
+        help="environment variable containing an OCI registry password or token",
+    )
+    init.add_argument(
+        "--build-arg",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="checked-in Dockerfile ARG value used for graphing and builds; repeat as needed",
     )
 
     images = root_subparsers.add_parser(
@@ -271,8 +303,11 @@ Run 'platform images COMMAND --help' for command-specific options.
 
     registry_login = commands.add_parser(
         "registry-login",
-        help="authenticate the selected registry transport to ECR",
-        description="Authenticate the selected registry transport to ECR.",
+        help="authenticate the selected transport to the configured registry provider",
+        description=(
+            "Authenticate with ECR, use OCI username/password credentials, or deliberately rely "
+            "on ambient transport credentials according to platform-images.toml."
+        ),
     )
     _transport_arguments(registry_login)
 
@@ -428,6 +463,15 @@ def _run_init(arguments: argparse.Namespace, cwd: Path | None) -> int:
             if arguments.registry_transport is not None
             else None
         ),
+        registry_provider=RegistryProvider(arguments.registry_provider),
+        registry_authentication=(
+            RegistryAuthentication(arguments.registry_authentication)
+            if arguments.registry_authentication is not None
+            else None
+        ),
+        registry_username_environment_variable=arguments.registry_username_variable,
+        registry_password_environment_variable=arguments.registry_password_variable,
+        build_arguments=parse_build_arguments(arguments.build_arg),
     )
     config = RepositoryConfig.load(root)
     report = validate_repository(config)
@@ -592,7 +636,11 @@ def _ci_base_head(
 
 def _registry_client(config: RepositoryConfig, registry: str, env: Mapping[str, str]):
     static = registry_from_environment_json(env.get("PLATFORM_IMAGES_STABLE_REFS"))
-    return static or ECRRegistryClient(config, registry)
+    if static is not None:
+        return static
+    if config.registry.provider is RegistryProvider.OCI:
+        return OCIRegistryClient(config, registry, env)
+    return ECRRegistryClient(config, registry)
 
 
 def _builder(
@@ -817,6 +865,7 @@ def _run(arguments: argparse.Namespace, cwd: Path | None, environment: Mapping[s
             root=root,
             dry_run=arguments.dry_run,
             builder=_builder(arguments, config),
+            build_arguments=config.dockerfile.arguments,
         )
         if arguments.dry_run:
             print("\n".join(commands))
@@ -888,6 +937,7 @@ def _run(arguments: argparse.Namespace, cwd: Path | None, environment: Mapping[s
             environment=environment,
             builder=builder,
             registry_transport=transport,
+            build_arguments=config.dockerfile.arguments,
         )
         _emit_build_result(result, arguments.result_file, root=root)
         return 0
@@ -898,12 +948,20 @@ def _run(arguments: argparse.Namespace, cwd: Path | None, environment: Mapping[s
                 f"{config.registry.registry_environment_variable} is required for registry login"
             )
         transport = _transport(arguments, config)
-        login_to_ecr(registry, cwd=root, transport=transport)
+        authenticated = login_to_registry(
+            config,
+            registry,
+            environment=environment,
+            cwd=root,
+            transport=transport,
+        )
         print(
             json.dumps(
                 {
                     "registry": registry.rstrip("/"),
-                    "authenticated": True,
+                    "authenticated": authenticated,
+                    "authentication": config.registry.authentication.value,
+                    "provider": config.registry.provider.value,
                     "engine": transport.value,
                     "registry_transport": transport.value,
                 }
@@ -938,6 +996,7 @@ def _run(arguments: argparse.Namespace, cwd: Path | None, environment: Mapping[s
             environment=environment,
             builder=builder,
             registry_transport=transport,
+            build_arguments=config.dockerfile.arguments,
         )
         _emit_build_result(result, arguments.result_file, root=root)
         return 0

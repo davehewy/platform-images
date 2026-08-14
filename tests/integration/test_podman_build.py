@@ -75,12 +75,25 @@ def test_fully_qualified_local_parent_is_replaced_by_planned_image(
         encoding="utf-8",
     )
     (application / "Dockerfile").write_text(
-        "FROM registry.invalid/gitlab/base:latest\n"
+        "ARG LOCAL_PARENT\n"
+        "FROM ${LOCAL_PARENT}\n"
         'RUN test "$(cat /parent-marker)" = exact-local-parent\n',
         encoding="utf-8",
     )
 
-    assert main(["init", "--builder", builder], cwd=root) == 0
+    assert (
+        main(
+            [
+                "init",
+                "--builder",
+                builder,
+                "--build-arg",
+                "LOCAL_PARENT=registry.invalid/gitlab/base:latest",
+            ],
+            cwd=root,
+        )
+        == 0
+    )
     assert main(["images", "build", "application"], cwd=root) == 0
 
 

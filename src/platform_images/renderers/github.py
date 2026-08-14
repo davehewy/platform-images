@@ -11,7 +11,13 @@ from platform_images.backends import validate_execution_pair
 from platform_images.config import RepositoryConfig
 from platform_images.errors import PlatformImagesError
 from platform_images.graph import ImageGraph
-from platform_images.models import BuildBackend, BuildPlan, RegistryTransport
+from platform_images.models import (
+    BuildBackend,
+    BuildPlan,
+    RegistryAuthentication,
+    RegistryProvider,
+    RegistryTransport,
+)
 
 CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"  # v7.0.1
 UPLOAD_ARTIFACT = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"  # v7.0.1
@@ -190,6 +196,7 @@ def render_github_workflow(
     _valid_variable(aws_region_variable, "--aws-region-variable")
     layer_count = graph_layer_count(graph)
     registry_variable = config.registry.registry_environment_variable
+    _valid_variable(registry_variable, "registry.registry_environment_variable")
     source_env: dict[str, str] = {
         registry_variable: f"${{{{ vars.{registry_variable} }}}}",
         "CI_COMMIT_SHA": "${{ github.event.pull_request.head.sha || github.sha }}",
@@ -200,10 +207,26 @@ def render_github_workflow(
         "CI_PROJECT_URL": "${{ github.server_url }}/${{ github.repository }}",
         "CI_MERGE_REQUEST_IID": "${{ github.event.pull_request.number }}",
     }
+    credential_env: dict[str, str] = {}
     permissions: dict[str, str] = {"contents": "read"}
-    if aws_auth == "oidc":
-        permissions["id-token"] = "write"
-    auth_steps = [_aws_step(aws_role_variable, aws_region_variable)] if aws_auth == "oidc" else []
+    auth_steps: list[dict[str, object]] = []
+    if config.registry.provider is RegistryProvider.ECR:
+        if aws_auth == "oidc":
+            permissions["id-token"] = "write"
+            auth_steps.append(_aws_step(aws_role_variable, aws_region_variable))
+    elif config.registry.authentication is RegistryAuthentication.CREDENTIALS:
+        username_variable = config.registry.username_environment_variable
+        password_variable = config.registry.password_environment_variable
+        _valid_variable(username_variable, "registry.username_environment_variable")
+        _valid_variable(password_variable, "registry.password_environment_variable")
+        credential_env[username_variable] = (
+            "${{ github.actor }}"
+            if username_variable == "GITHUB_ACTOR"
+            else f"${{{{ secrets.{username_variable} }}}}"
+        )
+        credential_env[password_variable] = f"${{{{ secrets.{password_variable} }}}}"
+        if password_variable == "GITHUB_TOKEN":
+            permissions["packages"] = "write"
 
     jobs: dict[str, object] = {
         "validate": {
@@ -229,6 +252,7 @@ def render_github_workflow(
             "permissions": permissions,
             "env": {
                 **source_env,
+                **credential_env,
                 "REBUILD_ALL": "${{ inputs.rebuild_all || 'false' }}",
             },
             "outputs": {
@@ -283,7 +307,7 @@ def render_github_workflow(
             "runs-on": runner,
             "timeout-minutes": 45,
             "permissions": permissions,
-            "env": source_env,
+            "env": {**source_env, **credential_env},
             "strategy": {
                 "fail-fast": False,
                 "matrix": f"${{{{ fromJSON(needs.plan.outputs.layer_{index}) }}}}",
@@ -303,7 +327,7 @@ def render_github_workflow(
                 ],
                 {**_artifact_download_step(), "if": "matrix.target != ''"},
                 {
-                    "name": "Authenticate registry transport to ECR",
+                    "name": "Authenticate registry transport",
                     "if": "matrix.target != ''",
                     "run": (
                         "platform images registry-login --registry-transport "
@@ -394,7 +418,7 @@ def render_github_workflow(
         "runs-on": runner,
         "timeout-minutes": 20,
         "permissions": permissions,
-        "env": source_env,
+        "env": {**source_env, **credential_env},
         "steps": [
             _checkout_step(),
             _install_step(),
@@ -402,7 +426,7 @@ def render_github_workflow(
             *_runtime_steps(builder, registry_transport),
             _artifact_download_step(),
             {
-                "name": "Authenticate registry transport to ECR",
+                "name": "Authenticate registry transport",
                 "run": (
                     "platform images registry-login --registry-transport "
                     f"{registry_transport.value}"

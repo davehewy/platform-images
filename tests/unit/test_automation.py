@@ -99,9 +99,11 @@ def test_release_workflow_builds_all_supported_standalone_platforms() -> None:
     assert isinstance(jobs, dict)
     standalone = jobs["standalone"]
     publish = jobs["publish-standalone"]
+    attestations = jobs["verify-attestations"]
     verify = jobs["verify-installer"]
     assert isinstance(standalone, dict)
     assert isinstance(publish, dict)
+    assert isinstance(attestations, dict)
     assert isinstance(verify, dict)
     entries = standalone["strategy"]["matrix"]["include"]  # type: ignore[index]
     assert {(entry["os"], entry["arch"]) for entry in entries} == {
@@ -133,18 +135,42 @@ def test_release_workflow_builds_all_supported_standalone_platforms() -> None:
         "standalone-${{ needs.release.outputs.version }}-${{ matrix.platform }}"
     )
     assert publish["needs"] == ["release", "standalone"]
-    assert publish["permissions"] == {"contents": "write"}
+    assert publish["permissions"] == {
+        "contents": "write",
+        "id-token": "write",
+        "attestations": "write",
+    }
     download_step = next(
         step for step in publish["steps"] if step["name"] == "Download standalone archives"
     )
     assert download_step["with"]["pattern"] == ("standalone-${{ needs.release.outputs.version }}-*")
+    sbom_step = next(
+        step
+        for step in publish["steps"]
+        if step["name"] == "Generate SPDX software bill of materials"
+    )
+    assert sbom_step["with"]["format"] == "spdx-json"
+    assert sbom_step["with"]["upload-artifact"] == "false"
+    assert sum(step.get("uses", "").startswith("actions/attest@") for step in publish["steps"]) == 2
+    provenance = next(
+        step for step in publish["steps"] if step.get("name") == "Attest release build provenance"
+    )
+    assert provenance["with"]["subject-path"] == "release-dist/*"
     upload_step = next(
         step
         for step in publish["steps"]
-        if step["name"] == "Attach standalone archives to the GitHub release"
+        if step["name"] == "Attach complete asset set to the GitHub release"
     )
     assert upload_step["env"]["GH_REPO"] == "${{ github.repository }}"
-    assert verify["needs"] == ["release", "publish-standalone"]
+    assert attestations["needs"] == ["release", "publish-standalone"]
+    attestation_script = next(
+        step["run"]
+        for step in attestations["steps"]
+        if step.get("name") == "Verify build provenance and SPDX attestations"
+    )
+    assert 'gh attestation verify SHA256SUMS --repo "$GH_REPO"' in attestation_script
+    assert "*.spdx.json) continue ;;" in attestation_script
+    assert verify["needs"] == ["release", "publish-standalone", "verify-attestations"]
     assert {entry["platform"] for entry in verify["strategy"]["matrix"]["include"]} == {
         entry["platform"] for entry in entries
     }

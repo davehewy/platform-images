@@ -35,7 +35,7 @@ manifest consumption remains the correct approach for an atomic deployment set.
 
 Job retries first pull the immutable output tag. If its target, commit, source, and dependency-input
 identity labels match, the job returns the existing digest without rebuilding or pushing. A tag
-whose identity differs is an explicit collision failure; immutable ECR tags never need to be made
+whose identity differs is an explicit collision failure; immutable registry tags never need to be made
 mutable for retry support.
 
 ## Test or deploy the newly built images
@@ -80,15 +80,22 @@ The selected runner must provide:
 - Git with full repository history
 - a supported builder/transport pair: Docker Buildx, Podman, Buildah, or nerdctl/BuildKit, with the
   named image contexts and versions in [container backends](container-backends.md)
-- AWS CLI and workload authentication for ECR
-- network access to pull base images and pull/push ECR images
+- network access to pull base images and pull/push images in the configured registry
+- for generic OCI providers, username/password variables or an already authenticated trusted runner
+- for ECR, AWS CLI plus short-lived workload authentication
 
-Required variables include `PLATFORM_IMAGES_REGISTRY`. GitLab supplies commit, pipeline, project,
-branch, and merge-request variables. AWS credentials should use the organisation's existing
-short-lived workload identity rather than static repository secrets.
-`platform images registry-login` parses the ECR region from that registry value, retrieves the
-regional token, and passes it to the selected registry transport's login command over stdin; it does
-not depend on an ambient default region or print the credential.
+Required variables include `PLATFORM_IMAGES_REGISTRY`, or the custom name in
+`registry.registry_environment_variable`. GitLab supplies commit, pipeline, project, branch, and
+merge-request variables. For a generic OCI provider with `authentication = "credentials"`, expose
+the username and password variables named in `platform-images.toml` as masked, protected CI/CD
+variables. `registry-login` passes the password to the selected transport over stdin and never
+prints it. For `authentication = "ambient"`, runner provisioning must already own both transport
+login and OCI API access.
+
+ECR users should rely on the organisation's short-lived workload identity rather than static
+repository secrets. `registry-login` parses the ECR region from the registry hostname, retrieves
+the regional token, and passes it to the transport over stdin; it does not depend on an ambient
+default region.
 
 The example template sets `PLATFORM_IMAGES_RUNNER_TAG=podman` and expands it in `.image-build.tags`.
 Override that CI/CD variable to route generated jobs to the fleet that provides the configured

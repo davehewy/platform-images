@@ -63,6 +63,24 @@ All retry paths compare four OCI identity labels before reusing an existing outp
 source repository, logical target name, and the exact dependency-reference map. A digest without a
 matching identity is not accepted.
 
+## Registry providers
+
+Registry providers are separate from transports. The provider resolves an unchanged stable tag to
+an immutable manifest digest during planning; the transport logs in and moves image data.
+
+| Provider | Stable lookup | Authentication | Typical services |
+| --- | --- | --- | --- |
+| `oci` | OCI Distribution `GET /v2/<repository>/manifests/<tag>`; validates `Docker-Content-Digest` or hashes the returned manifest bytes | Username/password with Basic or Bearer challenge, or deliberately ambient credentials | Nexus, GitLab Container Registry, GHCR, Harbor, Docker Registry |
+| `ecr` | AWS `ecr describe-images` with explicit registry account and region | Regional token from `aws ecr get-login-password` | Amazon ECR |
+
+OCI lookup fetches only the manifest, never image layers. `authentication = "credentials"` reads
+the configured username/password environment variables for both lookup and transport login.
+`authentication = "ambient"` skips the login command and is appropriate only when a trusted runner
+or earlier workflow step already configured the selected transport. Direct stable-manifest lookup
+must then work anonymously or the runner must expose both configured OCI credential variables;
+ambient mode never assumes that a transport credential store is readable as an HTTP credential
+store. ECR requires `authentication = "ecr"`.
+
 ## Valid combinations
 
 | Builder | Docker transport | Podman transport | Buildah transport | nerdctl transport |
@@ -90,6 +108,8 @@ namespace = "platform-images"
 registry_environment_variable = "PLATFORM_IMAGES_REGISTRY"
 stable_tag = "main"
 transport = "podman"
+provider = "oci"
+authentication = "credentials"
 ```
 
 Override them for one execution:
@@ -120,8 +140,9 @@ New repositories should use `build.backend` and `registry.transport` so ownershi
   topology. The project CI installs the pinned full distribution and starts isolated, transient
   containerd and BuildKit system services as its integration fixture.
 
-Git, AWS CLI, registry network access, and short-lived workload credentials remain common
-requirements. The standalone `platform` executable is available on Linux, macOS, and Windows, but
+Git, registry network access, and short-lived credentials remain common requirements; AWS CLI is
+needed only for the ECR provider. The standalone `platform` executable is available on Linux,
+macOS, and Windows, but
 the advertised Buildah and nerdctl integration environments are Linux. Docker Desktop is the most
 direct supported execution path on macOS and Windows; Podman-machine environments may work but are
 not currently part of the hosted integration gate.

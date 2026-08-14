@@ -249,6 +249,63 @@ def test_generated_github_workflow_supports_podman_and_ambient_credentials(
     )
 
 
+def test_generated_github_workflow_uses_oci_registry_secrets_without_aws(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory({"base": "FROM alpine\n"})
+    config_path = root / "platform-images.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            'stable_tag = "main"',
+            'stable_tag = "main"\nprovider = "oci"\nauthentication = "credentials"\n'
+            'username_environment_variable = "NEXUS_USERNAME"\n'
+            'password_environment_variable = "NEXUS_PASSWORD"',
+        ),
+        encoding="utf-8",
+    )
+    config, graph = state(root)
+
+    document = yaml.safe_load(render_github_workflow(graph, config))
+    plan = document["jobs"]["plan"]
+    layer = document["jobs"]["image_layer_0"]
+
+    assert "NEXUS_USERNAME" not in document["jobs"]["validate"]["env"]
+    assert "NEXUS_PASSWORD" not in document["jobs"]["validate"]["env"]
+    assert "NEXUS_PASSWORD" not in document["jobs"]["manifest"]["env"]
+    assert plan["env"]["NEXUS_USERNAME"] == "${{ secrets.NEXUS_USERNAME }}"
+    assert plan["env"]["NEXUS_PASSWORD"] == "${{ secrets.NEXUS_PASSWORD }}"
+    assert document["jobs"]["promote"]["env"]["NEXUS_PASSWORD"] == ("${{ secrets.NEXUS_PASSWORD }}")
+    assert "id-token" not in plan["permissions"]
+    assert plan["permissions"] == {"contents": "read"}
+    assert not any("AWS" in step.get("name", "") for step in plan["steps"])
+    assert any(step.get("name") == "Authenticate registry transport" for step in layer["steps"])
+
+
+def test_generated_github_workflow_can_use_native_ghcr_identity(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory({"base": "FROM alpine\n"})
+    config_path = root / "platform-images.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            'stable_tag = "main"',
+            'stable_tag = "main"\nprovider = "oci"\nauthentication = "credentials"\n'
+            'username_environment_variable = "GITHUB_ACTOR"\n'
+            'password_environment_variable = "GITHUB_TOKEN"',
+        ),
+        encoding="utf-8",
+    )
+    config, graph = state(root)
+
+    document = yaml.safe_load(render_github_workflow(graph, config))
+    plan = document["jobs"]["plan"]
+
+    assert plan["env"]["GITHUB_ACTOR"] == "${{ github.actor }}"
+    assert plan["env"]["GITHUB_TOKEN"] == "${{ secrets.GITHUB_TOKEN }}"
+    assert plan["permissions"] == {"contents": "read", "packages": "write"}
+    assert "GITHUB_TOKEN" not in document["jobs"]["validate"]["env"]
+
+
 @pytest.mark.parametrize(
     ("builder", "transport", "verification"),
     [

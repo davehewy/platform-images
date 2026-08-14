@@ -10,7 +10,13 @@ from conftest import git
 from platform_images import __version__
 from platform_images.cli import _ci_base_head, main
 from platform_images.config import RepositoryConfig
-from platform_images.models import BuildBackend, BuildMode, RegistryTransport
+from platform_images.models import (
+    BuildBackend,
+    BuildMode,
+    RegistryAuthentication,
+    RegistryProvider,
+    RegistryTransport,
+)
 from platform_images.validation import validate_repository
 
 
@@ -76,6 +82,8 @@ def test_init_infers_multiple_roots_and_external_images(tmp_path: Path, capsys) 
     )
     assert config.build.backend is BuildBackend.DOCKER
     assert config.registry.transport is RegistryTransport.DOCKER
+    assert config.registry.provider is RegistryProvider.OCI
+    assert config.registry.authentication is RegistryAuthentication.CREDENTIALS
     assert config.dockerfile.allowed_short_external_images == frozenset({"alpine", "scratch"})
     assert validate_repository(config).valid
     output = capsys.readouterr().out
@@ -84,6 +92,61 @@ def test_init_infers_multiple_roots_and_external_images(tmp_path: Path, capsys) 
     assert "Allowed short external images inferred from build files:" in output
     assert "Initial validation passed (2 image targets)." in output
     assert "Next: platform images graph" in output
+
+
+def test_init_configures_build_arguments_for_graphing_and_real_builds(
+    tmp_path: Path, capsys
+) -> None:
+    root = tmp_path / "repository"
+    base = root / "containers" / "base"
+    application = root / "containers" / "application"
+    base.mkdir(parents=True)
+    application.mkdir(parents=True)
+    (base / "Dockerfile").write_text("FROM alpine:3.22\n", encoding="utf-8")
+    (application / "Dockerfile").write_text(
+        "ARG PARENT\nFROM ${PARENT}\n",
+        encoding="utf-8",
+    )
+
+    assert (
+        main(
+            [
+                "init",
+                "--build-arg",
+                "PARENT=nexus.example.com/gitlab-runner/base:latest",
+            ],
+            cwd=root,
+            environment={},
+        )
+        == 0
+    )
+
+    config = RepositoryConfig.load(root)
+    assert config.dockerfile.arguments == {"PARENT": "nexus.example.com/gitlab-runner/base:latest"}
+    report = validate_repository(config)
+    assert report.valid
+    assert report.graph.direct_dependencies("application") == ("base",)
+    capsys.readouterr()
+
+    assert main(["images", "build", "application", "--dry-run"], cwd=root) == 0
+    output = capsys.readouterr().out
+    assert "--build-arg PARENT=nexus.example.com/gitlab-runner/base:latest" in output
+
+
+def test_init_can_select_ecr_provider_without_extra_auth_configuration(
+    tmp_path: Path, capsys
+) -> None:
+    root = tmp_path / "repository"
+    image = root / "containers" / "base"
+    image.mkdir(parents=True)
+    (image / "Dockerfile").write_text("FROM alpine:3.22\n", encoding="utf-8")
+
+    assert main(["init", "--registry-provider", "ecr"], cwd=root, environment={}) == 0
+
+    config = RepositoryConfig.load(root)
+    assert config.registry.provider is RegistryProvider.ECR
+    assert config.registry.authentication is RegistryAuthentication.ECR
+    assert "Initial validation passed" in capsys.readouterr().out
 
 
 def test_init_accepts_explicit_empty_root_and_selected_backend(tmp_path: Path, capsys) -> None:

@@ -94,21 +94,51 @@ whole affected set. For a coordinated version that must exist on every image, di
 workflow with `rebuild_all` first and release that full manifest. See the
 [complete lifecycle](../README.md#from-commit-build-to-semantic-release).
 
-## Required repository variables
+## Required repository variables and secrets
 
-The default AWS OIDC workflow expects GitHub Actions repository or organisation variables:
+Every provider needs the registry hostname in `PLATFORM_IMAGES_REGISTRY`, or in the custom variable
+named by `registry.registry_environment_variable`. Generic OCI registries—Nexus, GitLab Container
+Registry, GHCR, Harbor, and other Distribution-compatible services—default to credentials stored
+as GitHub Actions secrets:
+
+| Secret or variable | Value |
+| --- | --- |
+| `PLATFORM_IMAGES_REGISTRY` (variable) | Hostname such as `nexus.example.com`, without a scheme or repository path. |
+| `PLATFORM_IMAGES_REGISTRY_USERNAME` (secret) | Robot, deploy-token, or workload-identity username with pull/push access. |
+| `PLATFORM_IMAGES_REGISTRY_PASSWORD` (secret) | Corresponding short-lived token or password. |
+
+The secret names follow `registry.username_environment_variable` and
+`registry.password_environment_variable`; the generated workflow maps same-named GitHub secrets
+only into registry-using jobs. For GHCR, supply a token with package-write permission as the
+configured password; the workflow does not assume that `GITHUB_TOKEN` is itself that password.
+
+GHCR can instead use the workflow's native identity without creating either secret:
+
+```toml
+[registry]
+provider = "oci"
+authentication = "credentials"
+username_environment_variable = "GITHUB_ACTOR"
+password_environment_variable = "GITHUB_TOKEN"
+```
+
+The GitHub renderer maps those two conventional names to `github.actor` and the job's automatic
+`GITHUB_TOKEN`, and grants `packages: write` only to the registry-using jobs. The repository or
+organisation must still allow Actions to write packages.
+
+Amazon ECR instead uses GitHub Actions repository or organisation variables:
 
 | Variable | Value |
 | --- | --- |
-| `PLATFORM_IMAGES_REGISTRY` | ECR hostname such as `123456789012.dkr.ecr.eu-west-2.amazonaws.com`. Use the custom name from `registry.registry_environment_variable` when configured. |
+| `PLATFORM_IMAGES_REGISTRY` | ECR hostname such as `123456789012.dkr.ecr.eu-west-2.amazonaws.com`. |
 | `AWS_ROLE_TO_ASSUME` | ARN of the short-lived GitHub Actions role. |
 | `AWS_REGION` | Region in which the OIDC role is assumed. Stable lookup and login still derive and verify the registry region from the ECR hostname. |
 
-The workflow requests only `contents: read` globally. Jobs that need AWS OIDC additionally request
-`id-token: write`. Configure the IAM trust policy for the intended repository, branch, and pull
-request subjects, and grant only the ECR operations described in [ECR setup](ecr-setup.md).
+Only ECR jobs request `id-token: write` and emit the AWS credentials action. Configure its IAM
+trust policy for the intended repository, branch, and pull-request subjects, and grant only the ECR
+operations described in [ECR setup](ecr-setup.md).
 
-For an already authenticated self-hosted runner, omit the OIDC action:
+For an already authenticated self-hosted ECR runner, omit the OIDC action:
 
 ```bash
 platform images generate-workflow github \
@@ -119,6 +149,12 @@ platform images generate-workflow github \
 
 `ambient` means the runner must already expose short-lived AWS credentials to AWS CLI. It does not
 mean anonymous registry access.
+
+Generic OCI providers also support `authentication = "ambient"`. In that mode the generated
+workflow emits no credentials and `registry-login` is deliberately a no-op: the selected transport
+must already be authenticated on that trusted runner. Stable OCI API requests must work
+anonymously or runner provisioning must expose both configured credential environment variables;
+the controller does not scrape a transport's credential store.
 
 ## Container backend selection
 
@@ -168,8 +204,9 @@ creation labels. See [container backends](container-backends.md) for versions an
 
 Running an edited container build file is arbitrary code execution. The generated workflow never
 uses `pull_request_target`. Pull requests from forks run only `validate`; the credentialed planning
-and image jobs are skipped. Same-repository pull requests can build review images when the AWS OIDC
-trust policy permits them. Review images use `ci-<run-id>-<commit>` tags and are never promoted.
+and image jobs are skipped. Same-repository pull requests can build review images when the
+configured registry trust or credential policy permits them. Review images use
+`ci-<run-id>-<commit>` tags and are never promoted.
 
 If the project must build fork contributions, use a separately reviewed, unprivileged workflow
 that cannot push to the production registry. Do not expose a registry-writing role to untrusted
@@ -178,7 +215,7 @@ fork code.
 ## Manual complete rebuild
 
 Run the workflow from the Actions tab with `rebuild_all` selected. This invokes `plan --ci --all`
-and is useful for first adoption, a new ECR namespace, or intentional cache-baseline recovery.
+and is useful for first adoption, a new registry namespace, or intentional cache-baseline recovery.
 Normal push and pull-request runs leave it false and calculate the minimal affected graph.
 
 ## Generator options
@@ -190,7 +227,7 @@ Normal push and pull-request runs leave it false and calculate the minimal affec
 | `--builder docker\|podman\|buildah\|nerdctl` | Selects the build implementation. Docker remains the generated default. |
 | `--registry-transport docker\|podman\|buildah\|nerdctl` | Selects login, retry inspection, push, and promotion tooling. |
 | `--engine <name>` | Backward-compatible shorthand selecting the same supported tool for both axes. |
-| `--aws-auth oidc\|ambient` | Emits the pinned AWS credentials action and `id-token: write`, or relies on runner credentials. |
+| `--aws-auth oidc\|ambient` | ECR only: emits the pinned AWS credentials action and `id-token: write`, or relies on runner credentials. |
 | `--aws-role-variable <name>` | Changes the GitHub variable containing the OIDC role ARN. |
 | `--aws-region-variable <name>` | Changes the GitHub variable containing the OIDC region. |
 | `--output <path>` | Writes below the repository root and creates parent directories. Omit it to print YAML to stdout. |

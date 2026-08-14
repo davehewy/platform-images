@@ -164,6 +164,7 @@ def build_graph(targets: Mapping[str, ImageTarget], config: RepositoryConfig) ->
             internal_namespace=config.registry.namespace,
             allowed_short_external_images=config.dockerfile.allowed_short_external_images,
             image_identities=image_identities,
+            build_arguments=config.dockerfile.arguments,
         )
         if read_error:
             result = DockerfileParseResult(

@@ -79,6 +79,20 @@ FROM ${REGISTRY}/platform-images/base:${VERSION}
     assert parsed.references[0].resolved == "base"
 
 
+def test_configured_build_arguments_resolve_identity_and_override_dockerfile_defaults() -> None:
+    parsed = parse_dockerfile(
+        "ARG REGISTRY=wrong.example/team\nFROM ${REGISTRY}/base:latest\n",
+        target_names=TARGETS,
+        internal_namespace="platform-images",
+        build_arguments={"REGISTRY": "nexus.example.com/gitlab-runner"},
+    )
+
+    reference = parsed.references[0]
+    assert reference.kind is ReferenceKind.LOCAL_TARGET
+    assert reference.resolved == "base"
+    assert reference.source == "nexus.example.com/gitlab-runner/base:latest"
+
+
 @pytest.mark.parametrize(
     "text",
     [

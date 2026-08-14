@@ -115,7 +115,7 @@ Install a specific version or choose another destination with environment variab
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/davehewy/platform-images/main/scripts/install.sh |
-  PLATFORM_IMAGES_VERSION=0.12.0 PLATFORM_IMAGES_INSTALL_DIR=/usr/local/bin sh
+  PLATFORM_IMAGES_VERSION=0.13.0 PLATFORM_IMAGES_INSTALL_DIR=/usr/local/bin sh
 ```
 
 On Windows, run this in PowerShell. It verifies the Windows archive, installs `platform.exe` below
@@ -132,16 +132,29 @@ Each [GitHub release](https://github.com/davehewy/platform-images/releases) prov
 
 | System | Architecture | Release asset |
 | --- | --- | --- |
-| GNU/Linux | AMD64 / x86_64 | `platform-images-v0.12.0-linux-amd64.tar.gz` |
-| GNU/Linux | ARM64 / AArch64 | `platform-images-v0.12.0-linux-arm64.tar.gz` |
-| macOS / Darwin | Intel AMD64 | `platform-images-v0.12.0-darwin-amd64.tar.gz` |
-| macOS / Darwin | Apple Silicon ARM64 | `platform-images-v0.12.0-darwin-arm64.tar.gz` |
-| Windows | AMD64 / x86_64 | `platform-images-v0.12.0-windows-amd64.zip` |
-| Windows | ARM64 | `platform-images-v0.12.0-windows-arm64.zip` |
+| GNU/Linux | AMD64 / x86_64 | `platform-images-v0.13.0-linux-amd64.tar.gz` |
+| GNU/Linux | ARM64 / AArch64 | `platform-images-v0.13.0-linux-arm64.tar.gz` |
+| macOS / Darwin | Intel AMD64 | `platform-images-v0.13.0-darwin-amd64.tar.gz` |
+| macOS / Darwin | Apple Silicon ARM64 | `platform-images-v0.13.0-darwin-arm64.tar.gz` |
+| Windows | AMD64 / x86_64 | `platform-images-v0.13.0-windows-amd64.zip` |
+| Windows | ARM64 | `platform-images-v0.13.0-windows-arm64.zip` |
 
 Every archive name contains its exact release version, so downloads from different releases remain
 self-identifying when stored together. Each archive contains the native `platform` executable,
-README, and MIT license. `SHA256SUMS` covers all six archives. The Linux executables are built on
+README, and MIT license. `SHA256SUMS` covers every archive, Python distribution, lockfile, and the
+versioned SPDX JSON software bill of materials. GitHub publishes signed build provenance for every
+downloadable payload and binds the SPDX SBOM to every archive, Python distribution, and lockfile.
+Verify a downloaded executable archive independently with:
+
+```bash
+gh attestation verify platform-images-v0.13.0-linux-amd64.tar.gz \
+  --repo davehewy/platform-images
+gh attestation verify platform-images-v0.13.0-linux-amd64.tar.gz \
+  --repo davehewy/platform-images \
+  --predicate-type https://spdx.dev/Document/v2.3
+```
+
+The Linux executables are built on
 Ubuntu 22.04 and target modern
 glibc-based 64-bit distributions. The macOS executables are built natively on Intel and Apple
 Silicon runners. Windows executables are built natively for x86_64 and ARM64; GitHub currently
@@ -149,8 +162,9 @@ classifies its hosted Windows ARM64 runner as public preview.
 
 The executable bundles Python and the Python package dependencies. Commands still expect the tools
 they orchestrate to exist: Git for change inspection, a [supported build backend and registry
-transport](docs/container-backends.md), and AWS CLI plus credentials for ECR login and
-stable-reference resolution.
+transport](docs/container-backends.md), and access to the configured registry. Generic OCI
+registries use their Distribution API plus username/password or ambient transport credentials;
+AWS CLI is required only when `registry.provider = "ecr"`.
 
 ### Install as a Python tool
 
@@ -158,7 +172,7 @@ If Python 3.12 is already part of the team's toolchain, `uv` can install an isol
 
 ```bash
 uv tool install --python 3.12 \
-  "git+https://github.com/davehewy/platform-images.git@v0.12.0"
+  "git+https://github.com/davehewy/platform-images.git@v0.13.0"
 ```
 
 The universal `platform_images-<version>-py3-none-any.whl` and conventional Python source
@@ -188,7 +202,7 @@ Confirm which release is installed:
 
 ```bash
 platform version
-# platform-images 0.12.0
+# platform-images 0.13.0
 ```
 
 In a repository that already contains image target directories but no configuration, initialize it
@@ -199,7 +213,10 @@ platform init
 ```
 
 `init` scans for existing `Dockerfile` and `Containerfile` targets, infers their parent directories
-as discovery roots, and writes a Docker-based starter `platform-images.toml`. Discovery roots can
+as discovery roots, and writes a Docker-based starter `platform-images.toml`. New configurations
+use the generic OCI registry provider, so Nexus, GitLab Container Registry, GHCR, Harbor, and other
+Distribution-compatible registries can resolve stable tags without pulling image layers. Select
+`--registry-provider ecr` when AWS-native lookup and login are preferred. Discovery roots can
 live at any depth and can be nested—for example, `utils` and `utils/container-images` can coexist.
 Directories beneath those roots that do not contain either build filename are ordinary repository
 directories and are ignored.
@@ -222,6 +239,17 @@ platform init \
 Use `--builder podman`, `buildah`, or `nerdctl` when Docker is not the team's default. `init` chooses
 the matching registry transport unless `--registry-transport` is set explicitly. Run
 `platform init --help` to see all initialization choices.
+
+If a Dockerfile obtains a registry prefix or complete parent reference from a global `ARG` without
+a default, provide the deterministic checked-in value during initialization:
+
+```bash
+platform init \
+  --build-arg SOURCE_REGISTRY=nexus.example.com/gitlab-runner
+```
+
+The generated `[dockerfile.arguments]` value is used for both dependency parsing and every real
+build command, preventing the graph and the builder from interpreting different parent images.
 
 Then, from the repository root:
 
@@ -300,6 +328,22 @@ FROM nexus.example.com/gitlab-runner/ubuntu24-04-base:latest
 The same target can be referenced from several private or public registry hosts without listing
 those hosts in configuration. An unmatched qualified source remains external. The tool only uses
 an exact final-component match automatically; it never makes a fuzzy graph edge.
+
+The same rule applies when the reference is assembled through a build argument:
+
+```dockerfile
+ARG SOURCE_REGISTRY
+FROM ${SOURCE_REGISTRY}/ubuntu24-04-base:latest
+```
+
+```toml
+[dockerfile.arguments]
+SOURCE_REGISTRY = "nexus.example.com/gitlab-runner"
+```
+
+The resolved source remains visible in `images show`, and every Docker, Podman, Buildah, or nerdctl
+command receives `--build-arg SOURCE_REGISTRY=...`. Values in this table are committed build policy,
+not secrets; registry passwords belong in CI secrets.
 
 During `platform init`, a common observed path such as `gitlab-runner/<logical-target>` becomes the
 single output namespace instead of generating one table per image:
@@ -562,7 +606,8 @@ platform images affected --base "$BASE_SHA" --head HEAD
 ```
 
 `base` is not rebuilt because no consumer needs a new base. The `curl` plan still needs an exact
-parent, so CI resolves `base:main` in ECR to its immutable digest and injects a reference like:
+parent, so CI resolves `base:main` through the configured ECR or generic OCI provider and injects
+an immutable reference. An ECR example is:
 
 ```text
 123456789012.dkr.ecr.eu-west-2.amazonaws.com/platform-images/base@sha256:<digest>
@@ -571,7 +616,7 @@ parent, so CI resolves `base:main` in ECR to its immutable digest and injects a 
 This is the important partial-rebuild case: the leaf is rebuilt, its unchanged parent is reused,
 and the parent cannot move underneath the running build.
 
-For offline plan inspection, provide the stable lookup instead of calling ECR:
+For offline plan inspection, provide the stable lookup instead of calling either registry API:
 
 ```bash
 export PLATFORM_IMAGES_REGISTRY=123456789012.dkr.ecr.eu-west-2.amazonaws.com
@@ -712,10 +757,13 @@ current graph and filling them dynamically from the change plan. If a graph edit
 than the checked-in workflow, planning fails with a regeneration instruction instead of dropping a
 dependency. Regenerate and commit the workflow whenever image relationships change.
 
-The default workflow uses Docker Buildx on `ubuntu-latest` and AWS OIDC. Configure repository
-variables `PLATFORM_IMAGES_REGISTRY`, `AWS_ROLE_TO_ASSUME`, and `AWS_REGION`. Pull requests from
-forks run graph validation but do not receive registry credentials or execute image builds. For a
-pre-authenticated self-hosted runner with Podman:
+The default workflow uses Docker Buildx on `ubuntu-latest`; registry authentication follows
+`platform-images.toml`. A generic OCI configuration uses the `PLATFORM_IMAGES_REGISTRY` repository
+variable plus the same-named username/password secrets configured under `[registry]`. An ECR
+configuration uses `PLATFORM_IMAGES_REGISTRY`, `AWS_ROLE_TO_ASSUME`, and `AWS_REGION` variables
+with short-lived AWS OIDC credentials. Pull requests from forks run graph validation but do not
+receive registry credentials or execute image builds. For a pre-authenticated self-hosted ECR
+runner with Podman:
 
 ```bash
 platform images generate-workflow github \
@@ -1140,6 +1188,9 @@ namespace = "platform-images"
 registry_environment_variable = "PLATFORM_IMAGES_REGISTRY"
 stable_tag = "main"
 transport = "podman"
+provider = "ecr"
+authentication = "ecr"
+scheme = "https"
 
 [tags]
 ci_prefix = "ci"
@@ -1174,6 +1225,10 @@ global_inputs = [
 | `registry.registry_environment_variable` | The environment-variable name from which the registry hostname is read. | Keep the default when one standard variable is acceptable. Change it to align with an established CI variable such as `COMPANY_ECR_REGISTRY` without hard-coding an account or region in the repository. |
 | `registry.stable_tag` | The mutable alias resolved for unchanged parents and updated after a successful default-branch graph. | `main` is a clear default. Change it to `stable`, `production`, or another existing convention. This is a build baseline, not an environment deployment mechanism. |
 | `registry.transport` | The CLI used for login, retry inspection, push, and promotion. Accepted values are `docker`, `podman`, `buildah`, and `nerdctl`. | Usually match the builder. Podman and Buildah may be mixed because they share containers-storage; Docker and nerdctl require their matching transport. |
+| `registry.provider` | Stable-tag resolver. `oci` uses the standard registry Distribution API; `ecr` uses AWS `DescribeImages`. Existing configurations default to `ecr`; new `init` configurations default to `oci`. | Use `oci` for Nexus, GitLab Registry, GHCR, Harbor, Docker Registry, and similar services. Use `ecr` when AWS-native identity and regional checks are wanted. |
+| `registry.authentication` | Login policy: `credentials` or `ambient` for OCI, and `ecr` for ECR. | Use `credentials` on ordinary hosted runners. Use `ambient` only when a trusted runner already configured the transport and stable-manifest API access is anonymous or the runner exposes both configured credential variables. Use `ecr` with AWS workload identity. |
+| `registry.username_environment_variable` / `password_environment_variable` | Names of the two secret environment variables consumed by OCI API lookup and `registry-login`. Defaults to `PLATFORM_IMAGES_REGISTRY_USERNAME` and `PLATFORM_IMAGES_REGISTRY_PASSWORD`. | Rename them to established protected CI variable names. Values never belong in TOML; generated GitHub workflows read same-named repository secrets. |
+| `registry.scheme` | `https` by default; controls generic OCI manifest and token requests. | Keep HTTPS. Set `http` only for an explicitly trusted internal development registry; ECR always requires HTTPS. |
 
 For ECR, the registry value is the host only:
 
@@ -1182,6 +1237,37 @@ export PLATFORM_IMAGES_REGISTRY=123456789012.dkr.ecr.eu-west-2.amazonaws.com
 ```
 
 The account and region are parsed from that hostname and passed explicitly to AWS CLI operations.
+
+For Nexus or another OCI registry, keep the hostname equally separate and provide protected
+credentials under the configured variable names:
+
+```toml
+[registry]
+namespace = "gitlab-runner"
+registry_environment_variable = "PLATFORM_IMAGES_REGISTRY"
+stable_tag = "main"
+transport = "docker"
+provider = "oci"
+authentication = "credentials"
+username_environment_variable = "NEXUS_USERNAME"
+password_environment_variable = "NEXUS_PASSWORD"
+scheme = "https"
+```
+
+```bash
+export PLATFORM_IMAGES_REGISTRY=nexus.example.com
+export NEXUS_USERNAME="$CI_NEXUS_USERNAME"
+export NEXUS_PASSWORD="$CI_NEXUS_TOKEN"
+platform images registry-login
+```
+
+Stable parent lookup uses `GET /v2/<repository>/manifests/<stable-tag>`, handles Basic and Bearer
+challenges, validates `Docker-Content-Digest` (or computes it from the manifest bytes), and never
+pulls image layers merely to calculate a plan.
+
+For GHCR in a generated GitHub workflow, set the configured variable names to `GITHUB_ACTOR` and
+`GITHUB_TOKEN`. The renderer then uses the workflow's native actor/token and grants package-write
+permission only to jobs that access the registry; no duplicate credential secrets are required.
 
 ### Image identity settings
 
@@ -1288,6 +1374,21 @@ names: discovered targets are local automatically. Keeping the list small catche
 targets. `scratch` is always allowed. A registry-qualified external reference such as
 `ghcr.io/organisation/tooling@sha256:...` does not need an allowlist entry.
 
+`dockerfile.arguments` supplies deterministic global Dockerfile/Containerfile `ARG` values:
+
+```toml
+[dockerfile.arguments]
+SOURCE_REGISTRY = "nexus.example.com/platform/base-images"
+UBUNTU_RELEASE = "24.04"
+```
+
+Use this when an image identity or reproducible build input has no suitable checked-in Dockerfile
+default. Configured values override Dockerfile defaults, participate in `FROM`, `COPY`/`ADD
+--from`, and `RUN --mount=from` parsing, and are passed as sorted `--build-arg` options to every
+supported backend. Validation prints this exact table as the remedy for an unresolved global ARG.
+Do not place credentials here: Docker build arguments can be recorded in image history and build
+logs.
+
 ### Change-selection settings
 
 `changes.global_inputs` adds repository paths whose modification must rebuild every target. Patterns
@@ -1313,16 +1414,18 @@ inputs listed earlier.
 | --- | --- | --- |
 | `PLATFORM_IMAGES_ROOT` | Run against a repository root other than the current directory. | Useful for wrappers, monorepo tooling, and local diagnostics invoked from another directory. |
 | The variable named by `registry_environment_variable` | Registry hostname used for CI outputs, stable lookups, login, and promotion. | Required for CI and change-based plans; normally define it as a protected GitLab project/group variable. |
-| `PLATFORM_IMAGES_STABLE_REFS` | JSON mapping of target names to immutable image references. | Use in tests, offline plan previews, or a non-ECR registry adapter. In normal ECR CI, omit it so the tool resolves the configured stable tag through AWS. |
+| Variables named by `username_environment_variable` and `password_environment_variable` | Generic OCI username and password/token. | Required when `provider = "oci"` and `authentication = "credentials"`. Generated GitHub workflows read same-named repository secrets; GitLab projects should use protected and masked variables. |
+| `PLATFORM_IMAGES_STABLE_REFS` | JSON mapping of target names to immutable image references. | Optional deterministic override for tests and offline plan previews. Normally omit it so ECR or OCI resolves the configured stable tag directly. |
 | `CI_PIPELINE_ID` | Makes merge-request tags unique to a pipeline. | Supplied automatically by GitLab. The generated GitHub workflow maps `github.run_id` to it. |
 | `CI_COMMIT_SHA`, `CI_PROJECT_URL` | Identify and label a CI build. | Supplied by GitLab; the generated GitHub workflow maps the checked-out head SHA and repository URL. CI builds fail rather than emit untraceable images when either is absent. |
 | `CI_MERGE_REQUEST_DIFF_BASE_SHA` | Preferred merge-request comparison base. | Supplied by GitLab merge-request pipelines. |
 | `CI_COMMIT_BEFORE_SHA`, `CI_DEFAULT_BRANCH`, `CI_COMMIT_BRANCH` | Select the comparison and distinguish default-branch promotion from review builds. | Supplied by GitLab or mapped from GitHub event context by the generated workflow. Full Git history is required. |
 | `SOURCE_DATE_EPOCH` or `CI_COMMIT_TIMESTAMP` | Sets the OCI creation timestamp label. | Use `SOURCE_DATE_EPOCH` for reproducible build metadata; otherwise GitLab's commit timestamp is used when present. |
 
-Never put registry credentials in `platform-images.toml`. `platform images registry-login` obtains a
-regional ECR token from the AWS CLI and passes it to the selected registry transport's login command
-over stdin. Use the organisation's short-lived workload identity for AWS authentication.
+Never put registry credentials in `platform-images.toml`. `platform images registry-login` passes
+OCI credentials to the selected transport over stdin, obtains a regional token from AWS CLI for
+ECR, or performs an explicit no-op for `authentication = "ambient"`. Prefer short-lived workload,
+job, deploy, or robot-account tokens over personal long-lived passwords.
 
 ## Recommended adoption flow
 
@@ -1336,7 +1439,9 @@ over stdin. Use the organisation's short-lived workload identity for AWS authent
    repository overrides, and genuine shared inputs in `platform-images.toml`.
 4. Choose `build.backend` and `registry.transport`, then run `platform images validate`, `graph`,
    and `build <leaf> --dry-run` locally. Review the inferred graph with image owners.
-5. Create the ECR repositories and runner permissions described in [ECR setup](docs/ecr-setup.md).
+5. Create the destination repositories and least-privilege pull/push credentials. ECR teams can
+   use the concrete IAM policy in [ECR setup](docs/ecr-setup.md); OCI providers use their native
+   project, robot-account, deploy-token, or workload-identity controls.
 6. Either add the parent/child setup in [GitLab CI](docs/gitlab-ci.md), or generate and commit
    `.github/workflows/container-images.yml` using [GitHub Actions](docs/github-actions.md). Keep
    full Git history available to the planning job.
@@ -1355,7 +1460,7 @@ over stdin. Use the organisation's short-lived workload identity for AWS authent
 | Command | Typical use |
 | --- | --- |
 | `platform version [--format json]` | Print the installed release without requiring a configured repository. `platform --version` is the shorter equivalent. |
-| `platform init [--discovery-root <path> ...] [--namespace <name>] [--builder <name>]` | Safely create `platform-images.toml` by inferring existing target groups or using explicit roots. Refuses to overwrite existing configuration. |
+| `platform init [--discovery-root <path> ...] [--namespace <name>] [--builder <name>] [--registry-provider oci\|ecr] [--build-arg NAME=VALUE ...]` | Safely create `platform-images.toml` by inferring existing target groups or using explicit roots. Refuses to overwrite existing configuration. |
 | `platform images list` | Inventory discovered image targets. |
 | `platform images show <name>` | Inspect one target's build file, output repository, aliases, dependencies, exact source-to-target bindings, and dependents. |
 | `platform images validate` | Gate commits before planning or building. |
@@ -1373,7 +1478,7 @@ over stdin. Use the organisation's short-lived workload identity for AWS authent
 | `platform images build-plan-target <plan> <name> [--result-file <path>]` | Strictly reload a persisted plan, build its named target, and optionally persist its result; used by GitHub matrix jobs. |
 | `platform images build-manifest <results...> --plan <plan> --output <path>` | Verify per-image results and publish the commit-to-image digest manifest; generated CI calls this automatically. |
 | `platform images github-matrix <plan> --max-layers <n>` | Turn a persisted plan into dependency-safe GitHub matrix outputs; used by generated workflows. |
-| `platform images registry-login [--registry-transport <name>]` | Authenticate the selected transport to ECR without exposing the token. |
+| `platform images registry-login [--registry-transport <name>]` | Authenticate the selected transport using ECR, OCI credentials, or an explicit ambient policy without printing a token. |
 | `platform images promote ... [--registry-transport <name>]` | Move a successfully built immutable output to a stable alias. |
 | `platform images promote-plan <plan> [--registry-transport <name>]` | Promote a complete default-branch plan only after its generated build graph succeeds. |
 | `platform images promote-manifest <manifest> --tag <version> --expected-commit <sha>` | Promote the exact digest-pinned outputs of a tested default-branch commit to a semantic version without rebuilding. Repeat `--image` to select entries. |
@@ -1389,7 +1494,9 @@ contains static topological layers and fills each layer with an affected-target 
 Both consume the same authoritative `image-plan.json` and preserve parallelism between independent
 targets.
 
-Each generated job uses only its direct local dependencies in `needs`. It pushes before completing,
+Each generated job uses only its direct local dependencies in `needs`. ECR and generic OCI
+providers resolve unchanged stable parents directly to immutable manifest digests before builds are
+scheduled. It pushes before completing,
 so jobs do not rely on a shared runner cache. Every supported registry transport pulls the exact
 output tag and inspects identity
 labels for target, commit, source, and dependency references. A matching image is reused by digest;
@@ -1457,10 +1564,14 @@ uv build
 ```
 
 The integration suite builds and verifies the `base -> curl` topology with Docker Buildx, Podman,
-Buildah, and nerdctl/BuildKit, skipping only tooling that is unavailable locally. GitHub CI installs
-or verifies all four and requires every real build to pass. It also repeats the locked quality suite
-and builds the wheel and source distribution. Conventional Commit messages drive Python Semantic
-Release after `main` passes CI.
+Buildah, and nerdctl/BuildKit, including a qualified local parent supplied through a configured
+Dockerfile `ARG`; it skips only tooling unavailable locally. A separate 100-image enterprise fixture
+spans four discovery roots, Nexus/GitLab/GHCR source names, a manual alias, an intentional external
+collision, configured ARG expansion, Git change detection, and the complete affected plan. GitHub
+CI installs or verifies all four backends and requires every real build to pass. It also repeats the
+locked quality suite and builds the wheel and source distribution. Conventional Commit messages
+drive Python Semantic Release after `main` passes CI; releases add all-asset checksums, an SPDX SBOM,
+signed provenance and SBOM attestations, and a verification job before installer tests.
 
 ## Support and contributing
 

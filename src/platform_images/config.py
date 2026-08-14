@@ -9,7 +9,12 @@ from pathlib import Path
 from platform_images.backends import default_transport, validate_execution_pair
 from platform_images.errors import ConfigurationError
 from platform_images.image_identity import registry_relative_repository, repository_name
-from platform_images.models import BuildBackend, RegistryTransport
+from platform_images.models import (
+    BuildBackend,
+    RegistryAuthentication,
+    RegistryProvider,
+    RegistryTransport,
+)
 
 NAMESPACE_RE = re.compile(r"^[a-z0-9]+(?:[._/-][a-z0-9]+)*$")
 TARGET_NAME_RE = re.compile(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*$")
@@ -17,6 +22,7 @@ IMAGE_ALIAS_RE = re.compile(
     r"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?"
     r"(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$"
 )
+VARIABLE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @dataclass(frozen=True)
@@ -25,6 +31,11 @@ class RegistryConfig:
     registry_environment_variable: str
     stable_tag: str
     transport: RegistryTransport
+    provider: RegistryProvider
+    authentication: RegistryAuthentication
+    username_environment_variable: str
+    password_environment_variable: str
+    scheme: str
 
 
 @dataclass(frozen=True)
@@ -41,6 +52,7 @@ class ChangeConfig:
 @dataclass(frozen=True)
 class DockerfileConfig:
     allowed_short_external_images: frozenset[str]
+    arguments: Mapping[str, str]
 
 
 @dataclass(frozen=True)
@@ -124,6 +136,7 @@ class RepositoryConfig:
             )
             raw_global_inputs = change_data["global_inputs"]
             raw_external_images = dockerfile_data.get("allowed_short_external_images", ())
+            raw_dockerfile_arguments = dockerfile_data.get("arguments", {})
             if not isinstance(identity_data, dict):
                 raise TypeError("identity must be a table")
             unexpected_identity_settings = sorted(set(identity_data) - {"external_repositories"})
@@ -166,11 +179,35 @@ class RepositoryConfig:
             transport = RegistryTransport(
                 str(registry_data.get("transport", default_transport(backend).value))
             )
+            provider = RegistryProvider(str(registry_data.get("provider", "ecr")))
+            authentication = RegistryAuthentication(
+                str(
+                    registry_data.get(
+                        "authentication",
+                        "ecr" if provider is RegistryProvider.ECR else "credentials",
+                    )
+                )
+            )
             registry = RegistryConfig(
                 namespace=str(registry_data["namespace"]),
                 registry_environment_variable=str(registry_data["registry_environment_variable"]),
                 stable_tag=str(registry_data["stable_tag"]),
                 transport=transport,
+                provider=provider,
+                authentication=authentication,
+                username_environment_variable=str(
+                    registry_data.get(
+                        "username_environment_variable",
+                        "PLATFORM_IMAGES_REGISTRY_USERNAME",
+                    )
+                ),
+                password_environment_variable=str(
+                    registry_data.get(
+                        "password_environment_variable",
+                        "PLATFORM_IMAGES_REGISTRY_PASSWORD",
+                    )
+                ),
+                scheme=str(registry_data.get("scheme", "https")),
             )
             validate_execution_pair(backend, transport, configuration=True)
             if not isinstance(raw_global_inputs, list) or not all(
@@ -183,6 +220,11 @@ class RepositoryConfig:
                 raise TypeError(
                     "dockerfile.allowed_short_external_images must be an array of strings"
                 )
+            if not isinstance(raw_dockerfile_arguments, dict) or not all(
+                isinstance(name, str) and isinstance(value, str)
+                for name, value in raw_dockerfile_arguments.items()
+            ):
+                raise TypeError("dockerfile.arguments must be a table of strings")
             global_inputs = tuple(sorted(raw_global_inputs))
             allowed_short_external_images = frozenset(raw_external_images) | {"scratch"}
             if not isinstance(image_data, dict):
@@ -217,10 +259,34 @@ class RepositoryConfig:
             tomllib.TOMLDecodeError,
         ) as exc:
             raise ConfigurationError(f"invalid configuration in {path}: {exc}") from exc
-        if not registry.registry_environment_variable.isidentifier():
-            raise ConfigurationError(
-                "registry_environment_variable must be a valid environment variable name"
+        invalid_registry_variables = [
+            name
+            for name in (
+                registry.registry_environment_variable,
+                registry.username_environment_variable,
+                registry.password_environment_variable,
             )
+            if VARIABLE_NAME_RE.fullmatch(name) is None
+        ]
+        if invalid_registry_variables:
+            raise ConfigurationError(
+                "registry environment-variable settings must be valid environment variable names: "
+                + ", ".join(invalid_registry_variables)
+            )
+        if registry.provider is RegistryProvider.ECR and (
+            registry.authentication is not RegistryAuthentication.ECR
+        ):
+            raise ConfigurationError("registry provider ecr requires authentication = 'ecr'")
+        if registry.provider is RegistryProvider.OCI and (
+            registry.authentication is RegistryAuthentication.ECR
+        ):
+            raise ConfigurationError(
+                "registry provider oci requires authentication = 'credentials' or 'ambient'"
+            )
+        if registry.scheme not in {"https", "http"}:
+            raise ConfigurationError("registry.scheme must be 'https' or 'http'")
+        if registry.provider is RegistryProvider.ECR and registry.scheme != "https":
+            raise ConfigurationError("registry provider ecr requires scheme = 'https'")
         invalid_external_names = sorted(
             name
             for name in allowed_short_external_images
@@ -249,6 +315,16 @@ class RepositoryConfig:
             )
         if len(raw_external_repositories) != len(set(raw_external_repositories)):
             raise ConfigurationError("identity.external_repositories must be unique")
+        invalid_dockerfile_arguments = sorted(
+            name
+            for name, value in raw_dockerfile_arguments.items()
+            if VARIABLE_NAME_RE.fullmatch(name) is None or "\x00" in value
+        )
+        if invalid_dockerfile_arguments:
+            raise ConfigurationError(
+                "dockerfile.arguments must use valid ARG names and values without NUL bytes: "
+                + ", ".join(invalid_dockerfile_arguments)
+            )
         for target_name, image in images.items():
             if not TARGET_NAME_RE.fullmatch(target_name):
                 raise ConfigurationError(f"invalid logical image target name: {target_name}")
@@ -307,7 +383,10 @@ class RepositoryConfig:
             registry=registry,
             tags=tags,
             changes=ChangeConfig(global_inputs),
-            dockerfile=DockerfileConfig(allowed_short_external_images),
+            dockerfile=DockerfileConfig(
+                allowed_short_external_images,
+                dict(sorted(raw_dockerfile_arguments.items())),
+            ),
             images=dict(sorted(images.items())),
             identity=IdentityConfig(frozenset(raw_external_repositories)),
             discovery=DiscoveryConfig(normalized_roots),

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from platform_images.backends import default_transport, validate_execution_pair
-from platform_images.config import NAMESPACE_RE, RepositoryConfig
+from platform_images.config import NAMESPACE_RE, VARIABLE_NAME_RE, RepositoryConfig
 from platform_images.discovery import inspect_targets
 from platform_images.dockerfile import parse_dockerfile
 from platform_images.errors import PlatformImagesError
@@ -17,7 +17,13 @@ from platform_images.image_identity import (
     registry_relative_repository,
     repository_name,
 )
-from platform_images.models import BuildBackend, ReferenceKind, RegistryTransport
+from platform_images.models import (
+    BuildBackend,
+    ReferenceKind,
+    RegistryAuthentication,
+    RegistryProvider,
+    RegistryTransport,
+)
 
 CONFIGURATION_NAME = "platform-images.toml"
 _IGNORED_DISCOVERY_DIRECTORIES = frozenset(
@@ -238,6 +244,11 @@ def _configuration_text(
     allowed_short_external_images: tuple[str, ...],
     builder: BuildBackend,
     transport: RegistryTransport,
+    registry_provider: RegistryProvider,
+    registry_authentication: RegistryAuthentication,
+    registry_username_environment_variable: str,
+    registry_password_environment_variable: str,
+    build_arguments: dict[str, str],
 ) -> str:
     global_inputs = (
         ".github/workflows/**",
@@ -245,12 +256,24 @@ def _configuration_text(
         ".gitlab-ci.yml",
         CONFIGURATION_NAME,
     )
+    rendered_arguments = "\n".join(
+        f"{json.dumps(name)} = {json.dumps(value)}"
+        for name, value in sorted(build_arguments.items())
+    )
+    arguments_configuration = (
+        f"\n[dockerfile.arguments]\n{rendered_arguments}\n" if rendered_arguments else ""
+    )
     return f"""\
 [registry]
 namespace = {json.dumps(namespace)}
 registry_environment_variable = "PLATFORM_IMAGES_REGISTRY"
 stable_tag = "main"
 transport = {json.dumps(transport.value)}
+provider = {json.dumps(registry_provider.value)}
+authentication = {json.dumps(registry_authentication.value)}
+username_environment_variable = {json.dumps(registry_username_environment_variable)}
+password_environment_variable = {json.dumps(registry_password_environment_variable)}
+scheme = "https"
 
 [tags]
 ci_prefix = "ci"
@@ -261,6 +284,7 @@ backend = {json.dumps(builder.value)}
 
 [dockerfile]
 allowed_short_external_images = {_toml_array(allowed_short_external_images)}
+{arguments_configuration}
 
 [changes]
 global_inputs = {_toml_array(global_inputs)}
@@ -277,6 +301,11 @@ def initialize_repository(
     namespace: str | None = None,
     builder: BuildBackend = BuildBackend.DOCKER,
     transport: RegistryTransport | None = None,
+    registry_provider: RegistryProvider = RegistryProvider.OCI,
+    registry_authentication: RegistryAuthentication | None = None,
+    registry_username_environment_variable: str = "PLATFORM_IMAGES_REGISTRY_USERNAME",
+    registry_password_environment_variable: str = "PLATFORM_IMAGES_REGISTRY_PASSWORD",
+    build_arguments: dict[str, str] | None = None,
 ) -> InitializationResult:
     root = root.resolve()
     if not root.is_dir():
@@ -295,6 +324,38 @@ def initialize_repository(
         )
     selected_transport = transport or default_transport(builder)
     validate_execution_pair(builder, selected_transport)
+    selected_authentication = registry_authentication or (
+        RegistryAuthentication.ECR
+        if registry_provider is RegistryProvider.ECR
+        else RegistryAuthentication.CREDENTIALS
+    )
+    if registry_provider is RegistryProvider.ECR and (
+        selected_authentication is not RegistryAuthentication.ECR
+    ):
+        raise PlatformImagesError("the ECR provider requires --registry-authentication ecr")
+    if registry_provider is RegistryProvider.OCI and (
+        selected_authentication is RegistryAuthentication.ECR
+    ):
+        raise PlatformImagesError(
+            "the OCI provider requires --registry-authentication credentials or ambient"
+        )
+    for value, option in (
+        (registry_username_environment_variable, "--registry-username-variable"),
+        (registry_password_environment_variable, "--registry-password-variable"),
+    ):
+        if VARIABLE_NAME_RE.fullmatch(value) is None:
+            raise PlatformImagesError(f"{option} must be a valid environment variable name")
+    selected_build_arguments = build_arguments or {}
+    invalid_build_arguments = sorted(
+        name
+        for name, value in selected_build_arguments.items()
+        if VARIABLE_NAME_RE.fullmatch(name) is None or "\x00" in value
+    )
+    if invalid_build_arguments:
+        raise PlatformImagesError(
+            "--build-arg names must be valid Dockerfile ARG names and values must not contain "
+            "NUL bytes: " + ", ".join(invalid_build_arguments)
+        )
     configured_roots = (
         _normalize_roots(root, discovery_roots) if discovery_roots else _infer_roots(root)
     )
@@ -316,6 +377,11 @@ def initialize_repository(
         allowed_short_external_images=external_images,
         builder=builder,
         transport=selected_transport,
+        registry_provider=registry_provider,
+        registry_authentication=selected_authentication,
+        registry_username_environment_variable=registry_username_environment_variable,
+        registry_password_environment_variable=registry_password_environment_variable,
+        build_arguments=selected_build_arguments,
     )
 
     try:

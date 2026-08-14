@@ -38,6 +38,17 @@ class RegistryTransport(StrEnum):
     BUILDAH = "buildah"
 
 
+class RegistryProvider(StrEnum):
+    ECR = "ecr"
+    OCI = "oci"
+
+
+class RegistryAuthentication(StrEnum):
+    ECR = "ecr"
+    CREDENTIALS = "credentials"
+    AMBIENT = "ambient"
+
+
 @dataclass(frozen=True)
 class ImageTarget:
     name: str

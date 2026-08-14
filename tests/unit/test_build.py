@@ -169,6 +169,36 @@ def test_build_command_uses_sorted_named_contexts_and_argument_list() -> None:
     ]
 
 
+def test_build_command_passes_configured_dockerfile_arguments() -> None:
+    target = BuildPlanTarget(
+        "application",
+        ("selected",),
+        ("base",),
+        ("base",),
+        "images/application/Dockerfile",
+        "images/application",
+        "localhost/platform-images/application:dev",
+        {"base": "localhost/platform-images/base:dev"},
+        False,
+    )
+
+    command = build_command(
+        target,
+        builder=BuildBackend.DOCKER,
+        build_arguments={
+            "VERSION": "24.04",
+            "REGISTRY": "nexus.example.com/gitlab-runner",
+        },
+    )
+
+    assert command[command.index("--build-arg") : command.index("--file")] == [
+        "--build-arg",
+        "REGISTRY=nexus.example.com/gitlab-runner",
+        "--build-arg",
+        "VERSION=24.04",
+    ]
+
+
 def test_build_command_replaces_fully_qualified_dockerfile_image_source() -> None:
     planned_base = "localhost/gitlab/ubuntu-base-24-04:dev"
     target = BuildPlanTarget(

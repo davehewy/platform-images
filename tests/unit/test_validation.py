@@ -450,7 +450,10 @@ def test_unresolved_reference_has_stable_code(
     repository_factory: Callable[[dict[str, str]], Path],
 ) -> None:
     root = repository_factory({"api": "ARG BASE\nFROM ${BASE}\n"})
-    assert "unresolved-reference" in codes(root)
+    report = validate_repository(RepositoryConfig.load(root))
+    issue = next(issue for issue in report.errors if issue.code == "unresolved-reference")
+    assert "[dockerfile.arguments]" in (issue.hint or "")
+    assert 'BASE = "registry.example/team"' in (issue.hint or "")
 
 
 def test_internal_typo_has_hint(repository_factory: Callable[[dict[str, str]], Path]) -> None:
@@ -548,6 +551,46 @@ def test_explicit_external_repositories_are_strictly_validated(
     )
 
     with pytest.raises(ConfigurationError):
+        RepositoryConfig.load(root)
+
+
+@pytest.mark.parametrize(
+    "registry_settings",
+    (
+        'provider = "ecr"\nauthentication = "credentials"',
+        'provider = "oci"\nauthentication = "ecr"',
+        'provider = "oci"\nauthentication = "credentials"\nscheme = "ftp"',
+    ),
+)
+def test_registry_provider_and_authentication_pairs_are_strictly_validated(
+    repository_factory: Callable[[dict[str, str]], Path], registry_settings: str
+) -> None:
+    root = repository_factory({"base": "FROM alpine\n"})
+    config_path = root / "platform-images.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            'stable_tag = "main"',
+            'stable_tag = "main"\n' + registry_settings,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError):
+        RepositoryConfig.load(root)
+
+
+def test_dockerfile_arguments_must_be_string_values_with_valid_arg_names(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory({"base": "FROM alpine\n"})
+    config_path = root / "platform-images.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        + '\n[dockerfile.arguments]\n"NOT-AN-ARG" = "value"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="valid ARG names"):
         RepositoryConfig.load(root)
 
 

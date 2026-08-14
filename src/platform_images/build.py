@@ -24,6 +24,7 @@ from platform_images.process import ProcessRunner
 from platform_images.references import immutable_reference
 
 DIGEST_RE = re.compile(r"sha256:[0-9A-Fa-f]{64}")
+ARGUMENT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 IMAGE_MANIFEST_MEDIA_TYPES = {
     "application/vnd.docker.distribution.manifest.v2+json",
     "application/vnd.oci.image.manifest.v1+json",
@@ -43,6 +44,7 @@ def build_command(
     push: bool = False,
     metadata_file: Path | None = None,
     context_overrides: Mapping[str, str] | None = None,
+    build_arguments: Mapping[str, str] | None = None,
 ) -> list[str]:
     if builder is not None and engine is not None and builder is not engine:
         raise ValueError("builder and legacy engine select different backends")
@@ -72,6 +74,8 @@ def build_command(
         command.extend(["--build-context", f"{context_name}={context}"])
     for name, value in sorted((labels or {}).items()):
         command.extend(["--label", f"{name}={value}"])
+    for name, value in sorted((build_arguments or {}).items()):
+        command.extend(["--build-arg", f"{name}={value}"])
     command.extend(["--file", target.dockerfile])
     if not (builder is BuildBackend.NERDCTL and push):
         command.extend(["--tag", target.output_ref])
@@ -87,6 +91,7 @@ def execute_local_plan(
     runner: ProcessRunner | None = None,
     builder: BuildBackend | None = None,
     engine: BuildBackend | None = None,
+    build_arguments: Mapping[str, str] | None = None,
 ) -> tuple[str, ...]:
     if builder is not None and engine is not None and builder is not engine:
         raise ValueError("builder and legacy engine select different backends")
@@ -109,6 +114,7 @@ def execute_local_plan(
                 target,
                 builder=builder,
                 context_overrides=overrides,
+                build_arguments=build_arguments,
             )
             rendered.append(shlex.join(command))
             if not dry_run:
@@ -319,6 +325,7 @@ def execute_ci_build(
     builder: BuildBackend | None = None,
     registry_transport: RegistryTransport | None = None,
     engine: BuildBackend | None = None,
+    build_arguments: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     if builder is not None and engine is not None and builder is not engine:
         raise ValueError("builder and legacy engine select different backends")
@@ -398,6 +405,7 @@ def execute_ci_build(
                     builder=builder,
                     push=True,
                     metadata_file=metadata_file,
+                    build_arguments=build_arguments,
                 ),
                 cwd=root,
             )
@@ -410,7 +418,13 @@ def execute_ci_build(
                 ) from exc
         elif strategy is PushStrategy.DIRECT_INSPECT:
             process.run(
-                build_command(plan_target, labels=labels, builder=builder, push=True),
+                build_command(
+                    plan_target,
+                    labels=labels,
+                    builder=builder,
+                    push=True,
+                    build_arguments=build_arguments,
+                ),
                 cwd=root,
             )
             verified = _existing_ci_result(
@@ -429,7 +443,15 @@ def execute_ci_build(
                 raise AssertionError("required registry verification returned no result")
             return verified
         else:
-            process.run(build_command(plan_target, labels=labels, builder=builder), cwd=root)
+            process.run(
+                build_command(
+                    plan_target,
+                    labels=labels,
+                    builder=builder,
+                    build_arguments=build_arguments,
+                ),
+                cwd=root,
+            )
             process.run(
                 push_command(
                     registry_transport,
@@ -468,6 +490,18 @@ def parse_input_references(values: list[str]) -> dict[str, str]:
             raise PlatformImagesError(f"duplicate --input-ref for dependency: {name}")
         result[name] = reference
     return result
+
+
+def parse_build_arguments(values: list[str]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for value in values:
+        name, separator, argument = value.partition("=")
+        if not separator or ARGUMENT_NAME_RE.fullmatch(name) is None or "\x00" in argument:
+            raise PlatformImagesError(f"invalid --build-arg {value!r}; expected <ARG_NAME>=<value>")
+        if name in result:
+            raise PlatformImagesError(f"duplicate --build-arg: {name}")
+        result[name] = argument
+    return dict(sorted(result.items()))
 
 
 def result_json(result: Mapping[str, object]) -> str:

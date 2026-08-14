@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import shlex
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from platform_images.image_identity import (
@@ -136,12 +137,13 @@ def parse_dockerfile(
     internal_namespace: str,
     allowed_short_external_images: frozenset[str] = frozenset({"scratch"}),
     image_identities: ImageIdentityResolver | None = None,
+    build_arguments: Mapping[str, str] | None = None,
 ) -> DockerfileParseResult:
     identities = image_identities or build_image_identity_resolver(
         target_names,
         internal_namespace,
     )
-    arguments: dict[str, str] = {}
+    arguments = dict(build_arguments or {})
     aliases: list[tuple[str, int]] = []
     known_aliases: set[str] = set()
     known_stage_indexes: set[str] = set()
@@ -160,7 +162,7 @@ def parse_dockerfile(
         instruction = tokens[0].upper()
         if instruction == "ARG" and not saw_from and len(tokens) >= 2:
             name, separator, value = tokens[1].partition("=")
-            if separator:
+            if separator and name not in arguments:
                 arguments[name] = value
             continue
         if instruction == "FROM":
