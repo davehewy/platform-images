@@ -2,6 +2,22 @@
 
 <!-- version list -->
 
+## v0.7.0 (2026-08-14)
+
+### Documentation
+
+- Point installation at v0.6.0
+  ([`4c64824`](https://github.com/davehewy/platform-images/commit/4c64824e044557b7a7b79a1d41813240f682063c))
+
+- Publish graph benchmark results
+  ([`7826211`](https://github.com/davehewy/platform-images/commit/78262118e0f8d06bf096e315c230e13fdd825ab7))
+
+### Features
+
+- **release**: Version standalone artifacts
+  ([`fb259c8`](https://github.com/davehewy/platform-images/commit/fb259c8c64ac083895f3559caa541086c225b216))
+
+
 ## v0.6.0 (2026-08-14)
 
 ### Bug Fixes
