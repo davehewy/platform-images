@@ -61,6 +61,13 @@ def test_github_actions_are_immutable_and_ci_gates_release() -> None:
         if str(step.get("uses", "")).startswith("python-semantic-release/python-semantic-release@")
     )
     assert semantic_release["with"]["commit"] == "false"
+    lockfile_payload = next(
+        step
+        for step in release_job["steps"]  # type: ignore[index]
+        if step.get("name") == "Include the exact lockfile in the verified release payload"
+    )
+    assert lockfile_payload["if"] == "steps.release.outputs.released == 'true'"
+    assert lockfile_payload["run"] == "cp uv.lock dist/uv.lock"
 
     integration = ci["jobs"]["container-engine-integration"]  # type: ignore[index]
     integration_script = "\n".join(
@@ -250,7 +257,7 @@ def test_release_and_commit_conventions_derive_versions_from_git_tags() -> None:
     assert "version_toml" not in semantic_release
     assert "version_variables" not in semantic_release
     assert semantic_release["build_command"] == "python scripts/build-release.py"
-    assert semantic_release["assets"] == ["uv.lock"]
+    assert "assets" not in semantic_release
     assert semantic_release["publish"]["upload_to_vcs_release"] is True
 
 
