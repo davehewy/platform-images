@@ -46,6 +46,10 @@ jobs:
           git_committer_name: github-actions[bot]
           git_committer_email: 41898282+github-actions[bot]@users.noreply.github.com
 
+      - name: Include the exact lockfile in the verified release payload
+        if: steps.release.outputs.released == 'true'
+        run: cp uv.lock dist/uv.lock
+
       - name: Upload distributions to the GitHub release
         if: steps.release.outputs.released == 'true'
         uses: python-semantic-release/publish-action@5a5718ce47b892ef699f2972dae122297771d641 # v10.6.1
