@@ -40,10 +40,12 @@ jobs:
       - name: Run unit and functional test suite
         run: uv run --locked --extra dev pytest -m "not integration" -q
 
-      - name: Guard 100-image graph planning performance
+      - name: Battle-test 360-image imperfect graph and CI generation
         run: >-
           uv run --locked python scripts/benchmark-graph.py
-          --images 100 --iterations 10 --max-leaf-plan-ms 50
+          --scenario imperfect --images 360 --iterations 7
+          --max-validate-ms 750 --max-leaf-plan-ms 75
+          --max-graph-render-ms 75 --max-ci-render-ms 750
 
       - name: Validate pull request title
         if: github.event_name == 'pull_request'

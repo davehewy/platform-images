@@ -555,6 +555,9 @@ Container image dependency graph
 Use `--format json` with `show`, `validate`, or `graph` when another tool needs to consume the
 result. JSON output includes a schema version so it can be treated as an automation contract. Use
 `platform images graph --ascii` when a terminal cannot display Unicode line-drawing characters.
+For a diamond or other multi-parent DAG, every incoming edge remains visible, but a shared target's
+children are expanded only on its first occurrence; later occurrences say `[already shown]` so a
+large graph cannot explode into exponentially repeated terminal output.
 
 ### Worked example 2: build a dependent image locally
 
@@ -728,8 +731,8 @@ publish_image_manifest:
 The `needs` edge is derived from the Dockerfile. Because every job pushes its unique output before
 completion, `image_curl` can run on a different GitLab runner with no shared container-engine image
 store. The later manifest stage waits for the complete build stage and receives every result
-artifact without adding a `needs` entry for every image, so a wide 100-image graph does not run into
-GitLab's per-job dependency limit.
+artifact without adding a `needs` entry for every image, so even the repository's 360-image stress
+graph does not make the manifest job run into GitLab's per-job dependency limit.
 
 The generated stage list also includes `consume`. Define project-specific scan, integration-test,
 or review-deploy jobs in the locally included GitLab template, give them `stage: consume`, and use
@@ -1362,7 +1365,8 @@ If a target named `curl` contains `FROM base`, the stored relationship is “`cu
 `base`”. Human tree output places `base` above `curl`, and schedulers receive the corresponding
 execution constraint “build `base` before `curl`”. Multi-parent relationships from `FROM`,
 `COPY`/`ADD --from`, and `RUN --mount=from` remain one DAG rather than being flattened into a tree;
-the text view may repeat a node, while `graph --format json` is the authoritative representation.
+the text view repeats each incoming occurrence but expands a target's subtree once, while
+`graph --format json` is the authoritative representation.
 
 A repository containing `a -> b -> a` is invalid. `platform images validate` reports the complete,
 deterministic cycle, and all graph-dependent commands stop before Git, container tooling, AWS, or CI
@@ -1525,28 +1529,43 @@ See [architecture](docs/architecture.md), [adding an image](docs/adding-an-image
 
 ## Performance and scaling
 
-**The graph controller is fast.** Even for a repository with 1,000 images, it can map a change
-through the complete dependency graph in under 1 ms and plan the deepest 1,000-image chain in about
-46 ms on the development machine used for the reference run.
+**The graph controller is fast, including on imperfect repositories.** A deterministic 360-image
+stress repository with 737 local edges validates in about 160 ms, maps a foundation change to all
+360 affected images in about 0.32 ms, renders its bounded 742-line terminal graph in about 1.1 ms,
+and creates the complete image plan plus both GitHub and GitLab CI output in about 150 ms on the
+development machine used for the reference run.
 
-The repository includes a reproducible benchmark that creates a synthetic multi-parent DAG spread
-across three discovery roots. These are median results from 14 August 2026 using Python 3.12:
+The default benchmark is deliberately awkward rather than perfectly tidy. It creates 360 mixed
+`Dockerfile`/`Containerfile` targets across seven roots—including overlapping `utils` and
+`utils/container-images` roots—with 25 build waves, fan-in, fan-out, diamonds, configured
+repositories, Nexus/GitLab/GHCR spellings, ARG-based parents, aliases, digests, multistage
+references, `COPY`/`ADD`/`RUN --mount` inputs, public and explicitly external images, heredocs, 28
+non-image directories, and eight qualified references that deliberately remain warnings. The unit
+suite also mutates the full corpus to prove deterministic rejection of cycles, ambiguous aliases,
+missing managed images, and malformed syntax.
 
-| Images | Dependency edges | Runs | Discover, parse, and validate | Topological order | Plan deepest leaf | Root change to affected set |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 100 | 292 | 25 | 23.416 ms | 0.042 ms | 4.341 ms | 0.099 ms |
-| 1,000 | 2,992 | 10 | 233.790 ms | 0.476 ms | 45.671 ms | 0.956 ms |
+These are median results from 14 August 2026 using Python 3.12:
+
+| Scenario | Images | Edges | Runs | Validate | Topological order | Plan leaf/upstream set | Root change impact | Terminal graph | Plan + render GitHub and GitLab |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Imperfect layered repo | 360 | 737 | 25 | 162.297 ms | 0.158 ms | 9.113 ms / 202 images | 0.324 ms / 360 images | 1.125 ms / 742 lines | 151.275 ms |
+| Imperfect layered repo | 1,000 | 2,086 | 5 | 601.176 ms | 0.469 ms | 41.941 ms / 914 images | 0.954 ms / 1,000 images | 4.143 ms / 2,091 lines | 412.766 ms |
+| Clean multi-parent chain | 100 | 292 | 25 | 23.416 ms | 0.042 ms | 4.341 ms / 100 images | 0.099 ms / 100 images | — | — |
+| Clean multi-parent chain | 1,000 | 2,992 | 10 | 233.790 ms | 0.476 ms | 45.671 ms / 1,000 images | 0.956 ms / 1,000 images | — | — |
 
 Run `scripts/benchmark-graph.py` to see how fast it is on your laptop or CI runner:
 
 ```bash
-uv run --locked python scripts/benchmark-graph.py --images 100 --iterations 25
+uv run --locked python scripts/benchmark-graph.py \
+  --scenario imperfect --images 360 --iterations 25
 ```
 
-Change `--images` to test a larger repository. Use `--json` to capture comparable results, or
-`--max-leaf-plan-ms <milliseconds>` to enforce a performance budget. The figures above measure the
-controller—filesystem discovery, Dockerfile parsing, graph construction, change propagation, and
-planning—not container builds or registry transfers. They are evidence from one machine rather
+Use `--scenario chain` for the simpler deep multi-parent graph, and change `--images` to test a
+larger repository. Use `--json` to capture comparable results. `--max-validate-ms`,
+`--max-leaf-plan-ms`, `--max-graph-render-ms`, and `--max-ci-render-ms` turn measurements into
+regression budgets. The figures above measure the controller—filesystem discovery, Dockerfile
+parsing, graph construction, change propagation, planning, terminal rendering, and YAML/JSON
+generation—not container builds or registry transfers. They are evidence from one machine rather
 than hardware guarantees, so benchmark the intended CI runner before choosing a local threshold.
 
 The implementation avoids work that grows quadratically with the number of images:
@@ -1555,33 +1574,37 @@ The implementation avoids work that grows quadratically with the number of image
 - deterministic topological ordering uses a priority queue;
 - affected selection visits each reachable target and edge once; and
 - local dependency reasons propagate through one reverse topological pass, using compact bitsets
-  when several explicit targets are selected.
+  when several explicit targets are selected; and
+- repeated qualified external names reuse their near-match result, so hundreds of identical public
+  base references do not each rescan every local target.
 
-CI runs the same 100-image benchmark with a deliberately generous 50 ms median budget for deep-leaf
-planning. That catches accidental reintroduction of per-target closure scans without turning normal
-runner variance into flaky builds. Dockerfile reads and parsing remain the largest controller cost;
-actual container builds and registry transfers will ordinarily dominate total pipeline time by
-orders of magnitude.
+CI recreates the 360-image imperfect repository and applies deliberately generous median ceilings
+of 750 ms for discovery/validation, 75 ms each for leaf planning and bounded terminal rendering,
+and 750 ms for all-image planning plus both pipeline renderers. Those ceilings catch accidental
+repeated scans, exponential tree expansion, and per-target closure work without turning normal
+runner variance into flaky builds. Dockerfile reads, parsing, and YAML serialization remain the
+largest controller costs; actual container builds and registry transfers will ordinarily dominate
+total pipeline time by orders of magnitude.
 
 ## Quality and integration checks
 
 ```bash
 uv run --locked --extra dev pre-commit run --all-files
 uv run --locked --extra dev pytest
-uv run --locked python scripts/benchmark-graph.py --images 100 --iterations 25
+uv run --locked python scripts/benchmark-graph.py --scenario imperfect --images 360 --iterations 25
 uv run --locked --extra dev pytest -m integration
 uv build
 ```
 
 The integration suite builds and verifies the `base -> curl` topology with Docker Buildx, Podman,
 Buildah, and nerdctl/BuildKit, including a qualified local parent supplied through a configured
-Dockerfile `ARG`; it skips only tooling unavailable locally. A separate 100-image enterprise fixture
-spans four discovery roots, Nexus/GitLab/GHCR source names, a manual alias, an intentional external
-collision, configured ARG expansion, Git change detection, and the complete affected plan. GitHub
-CI installs or verifies all four backends and requires every real build to pass. It also repeats the
-locked quality suite and builds the wheel and source distribution. Conventional Commit messages
-drive Python Semantic Release after `main` passes CI; releases add all-asset checksums, an SPDX SBOM,
-signed provenance and SBOM attestations, and a verification job before installer tests.
+Dockerfile `ARG`; it skips only tooling unavailable locally. The 100-image enterprise fixture still
+tests real Git change detection across four roots and several registry identities. The separate
+360-image adversarial fixture goes wider and noisier, and checks both generated CI formats in full.
+GitHub CI installs or verifies all four backends and requires every real build to pass. It also
+repeats the locked quality suite and builds the wheel and source distribution. Conventional Commit
+messages drive Python Semantic Release after `main` passes CI; releases add all-asset checksums, an
+SPDX SBOM, signed provenance and SBOM attestations, and a verification job before installer tests.
 
 ## Support and contributing
 

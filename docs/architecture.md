@@ -18,7 +18,8 @@ package makes repository conventions explicit and testable.
    spelling is retained for build-context replacement. Explicit external exceptions win over
    automatic basename inference; heredoc bodies remain excluded.
 3. **Graph** is authoritative as `dependencies[consumer]` and `dependents[input]`. JSON is the
-   machine contract; the tree is only a human projection and repeats multi-parent DAG nodes.
+   machine contract. The human tree retains every incoming edge, expands each target subtree once,
+   and marks later multi-parent occurrences as already shown, keeping output `O(V + E)`.
 4. **Validation** rejects unsafe names and paths, ambiguous build files, missing discovery roots,
    unresolved/internal references, unapproved short external names, stage-name collisions, and
    complete deterministic cycle paths. Strong qualified near-matches remain external but produce
@@ -67,8 +68,11 @@ The main graph operations are designed around edges rather than repeated whole-g
 Inverse adjacency is built in `O(V + E)`, deterministic topological ordering uses a heap in
 `O((V + E) log V)`, and affected propagation is `O(V + E)` over the reachable subgraph. A local
 plan computes its upstream closure once, then propagates selected-consumer reasons in one reverse
-topological pass. `scripts/benchmark-graph.py` exercises these paths with a configurable synthetic
-multi-root DAG; CI guards the 100-image deep-leaf case against algorithmic regressions.
+topological pass. Near-match results are cached per normalized external repository for the lifetime
+of an immutable resolver, avoiding a repeated all-target fuzzy scan when hundreds of targets use
+the same public base. `scripts/benchmark-graph.py` exercises these paths with a configurable graph;
+CI guards a 360-image, 737-edge, seven-root imperfect corpus through validation, planning, change
+impact, and complete GitHub/GitLab rendering.
 
 ## Reference policy
 

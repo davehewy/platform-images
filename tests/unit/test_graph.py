@@ -73,7 +73,7 @@ def test_upstream_and_downstream_closures(
     assert graph.downstream_closure(frozenset({"api"})) == {"api", "base", "curl"}
 
 
-def test_multi_parent_tree_repeats_edge_and_marks_target(
+def test_multi_parent_tree_retains_every_edge_and_marks_repeated_target(
     repository_factory: Callable[[dict[str, str]], Path],
 ) -> None:
     graph = graph_for(
@@ -87,7 +87,39 @@ def test_multi_parent_tree_repeats_edge_and_marks_target(
     )
     rendered = render_graph_text(graph)
     assert rendered.count("application (*)") == 2
+    assert rendered.count("application (*) [already shown]") == 1
     assert "(*) target has more than one local dependency" in rendered
+    assert "[already shown] incoming edge retained; repeated subtree omitted" in rendered
+
+
+def test_tree_renderer_is_stack_safe_for_more_than_one_thousand_levels(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    images = {"node-0000": "FROM alpine\n"}
+    images.update({f"node-{index:04d}": f"FROM node-{index - 1:04d}\n" for index in range(1, 1200)})
+
+    rendered = render_graph_text(graph_for(repository_factory(images)), ascii_only=True)
+
+    assert len(rendered.splitlines()) == 1201
+    assert rendered.startswith("Container image dependency graph\n\\-- node-0000\n")
+    assert rendered.endswith("\\-- node-1199")
+
+
+def test_cycle_detection_is_stack_safe_for_more_than_one_thousand_levels(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    images = {"node-0000": "FROM node-1199\n"}
+    images.update({f"node-{index:04d}": f"FROM node-{index - 1:04d}\n" for index in range(1, 1200)})
+    graph = graph_for(repository_factory(images))
+
+    cycle = graph.find_cycle()
+
+    assert cycle is not None
+    assert len(cycle) == 1201
+    assert cycle[:3] == ("node-0000", "node-1199", "node-1198")
+    assert cycle[-1] == "node-0000"
+    with pytest.raises(GraphCycleError):
+        graph.topological_order()
 
 
 def test_cycle_has_complete_deterministic_path(

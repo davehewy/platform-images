@@ -102,29 +102,35 @@ class ImageGraph:
     def find_cycle(self) -> tuple[str, ...] | None:
         visited: set[str] = set()
         active: list[str] = []
-        active_set: set[str] = set()
+        active_positions: dict[str, int] = {}
 
-        def visit(target: str) -> tuple[str, ...] | None:
-            visited.add(target)
-            active.append(target)
-            active_set.add(target)
-            for dependency in sorted(self.dependencies[target]):
-                if dependency in active_set:
-                    index = active.index(dependency)
-                    return tuple(active[index:] + [dependency])
-                if dependency not in visited:
-                    cycle = visit(dependency)
-                    if cycle:
-                        return cycle
-            active.pop()
-            active_set.remove(target)
-            return None
-
-        for target in sorted(self.targets):
-            if target not in visited:
-                cycle = visit(target)
-                if cycle:
-                    return cycle
+        for start in sorted(self.targets):
+            if start in visited:
+                continue
+            visited.add(start)
+            active_positions[start] = len(active)
+            active.append(start)
+            stack: list[tuple[str, tuple[str, ...], int]] = [
+                (start, tuple(sorted(self.dependencies[start])), 0)
+            ]
+            while stack:
+                target, dependencies, index = stack[-1]
+                if index == len(dependencies):
+                    stack.pop()
+                    active.pop()
+                    del active_positions[target]
+                    continue
+                dependency = dependencies[index]
+                stack[-1] = (target, dependencies, index + 1)
+                if dependency in active_positions:
+                    cycle_start = active_positions[dependency]
+                    return tuple(active[cycle_start:] + [dependency])
+                if dependency in visited:
+                    continue
+                visited.add(dependency)
+                active_positions[dependency] = len(active)
+                active.append(dependency)
+                stack.append((dependency, tuple(sorted(self.dependencies[dependency])), 0))
         return None
 
     def _require_target(self, target: str) -> None:
