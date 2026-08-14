@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.12.0 (2026-08-14)
+
+### Features
+
+- **identity**: Infer local images across registries
+  ([`8f28fdb`](https://github.com/davehewy/platform-images/commit/8f28fdbcb5b0cc1f1b7569b68b01a6b7c1ab3897))
+
+
 ## v0.11.0 (2026-08-14)
 
 ### Bug Fixes
