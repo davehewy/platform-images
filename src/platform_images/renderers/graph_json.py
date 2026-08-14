@@ -5,6 +5,7 @@ from pathlib import Path
 
 from platform_images.config import RepositoryConfig
 from platform_images.graph import ImageGraph
+from platform_images.models import ReferenceKind
 
 
 def graph_data(
@@ -21,6 +22,16 @@ def graph_data(
             "external_dependencies": [
                 reference.resolved or reference.raw
                 for reference in graph.external_dependencies[name]
+            ],
+            "local_references": [
+                {
+                    "source": reference.source or reference.raw,
+                    "target": reference.resolved,
+                    "instruction": reference.instruction,
+                    "line": reference.line_number,
+                }
+                for reference in graph.parse_results[name].references
+                if reference.kind is ReferenceKind.LOCAL_TARGET
             ],
             "dockerfile": target.dockerfile.relative_to(root).as_posix(),
         }

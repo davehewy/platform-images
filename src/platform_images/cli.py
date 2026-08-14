@@ -429,7 +429,8 @@ def _run_init(arguments: argparse.Namespace, cwd: Path | None) -> int:
             else None
         ),
     )
-    report = validate_repository(RepositoryConfig.load(root))
+    config = RepositoryConfig.load(root)
+    report = validate_repository(config)
     relative_configuration = result.configuration_path.relative_to(root).as_posix()
     target_word = "target" if result.target_count == 1 else "targets"
     root_word = "root" if len(result.discovery_roots) == 1 else "roots"
@@ -440,16 +441,32 @@ def _run_init(arguments: argparse.Namespace, cwd: Path | None) -> int:
     )
     for discovery_root in result.discovery_roots:
         print(f"  - {discovery_root}")
-    if result.image_repositories:
-        print("Published image repositories inferred from build-file references:")
-        for target, repository in result.image_repositories:
-            print(f"  - {target}: {repository}")
+    if result.inferred_registry_namespace is not None:
+        print(
+            "Output registry namespace inferred from qualified local references: "
+            f"{result.inferred_registry_namespace}"
+        )
+    elif result.source_repository_namespaces:
+        print(
+            "Qualified local-reference namespaces detected: "
+            + ", ".join(result.source_repository_namespaces)
+        )
+        print(
+            "They resolve automatically; build outputs use registry namespace: "
+            f"{config.registry.namespace}"
+        )
     if result.allowed_short_external_images:
         print("Allowed short external images inferred from build files:")
         for image in result.allowed_short_external_images:
             print(f"  - {image}")
     if report.valid:
         print(f"Initial validation passed ({result.target_count} image {target_word}).")
+        if report.warnings:
+            _summary, _separator, warning_details = _render_validation(report, "text").partition(
+                "\n\n"
+            )
+            print()
+            print(warning_details)
         print("Next: platform images graph")
     else:
         error_word = "error" if len(report.errors) == 1 else "errors"
@@ -480,19 +497,27 @@ def _render_validation(report: ValidationReport, output_format: str) -> str:
             },
             indent=2,
         )
+
+    def append_issues(lines: list[str], issues: tuple[ValidationIssue, ...]) -> None:
+        for issue in issues:
+            location = issue.path or "repository"
+            if issue.line is not None:
+                location += f":{issue.line}"
+            lines.extend(["", location, f"  [{issue.code}] {issue.message}"])
+            if issue.hint:
+                lines.append(f"  {issue.hint}")
+
     if report.valid:
-        summary = f"Validation passed ({len(report.graph.targets)} image targets)."
+        lines = [f"Validation passed ({len(report.graph.targets)} image targets)."]
         if report.warnings:
-            summary += f"\n\nWarnings: {len(report.warnings)}"
-        return summary
+            lines.extend(["", f"Warnings: {len(report.warnings)}"])
+            append_issues(lines, report.warnings)
+        return "\n".join(lines)
     lines = [f"Validation failed with {len(report.errors)} errors:"]
-    for issue in report.errors:
-        location = issue.path or "repository"
-        if issue.line is not None:
-            location += f":{issue.line}"
-        lines.extend(["", location, f"  {issue.message}"])
-        if issue.hint:
-            lines.append(f"  {issue.hint}")
+    append_issues(lines, report.errors)
+    if report.warnings:
+        lines.extend(["", f"Warnings: {len(report.warnings)}"])
+        append_issues(lines, report.warnings)
     return "\n".join(lines)
 
 
@@ -760,6 +785,15 @@ def _run(arguments: argparse.Namespace, cwd: Path | None, environment: Mapping[s
             print(f"  repository: {data['repository']}")
             print(f"  aliases: {', '.join(data['aliases']) or 'none'}")
             print(f"  dependencies: {', '.join(data['dependencies']) or 'none'}")
+            if data["local_references"]:
+                print("  local_references:")
+                for reference in data["local_references"]:
+                    print(
+                        f"    {reference['source']} -> {reference['target']} "
+                        f"({reference['instruction']}, line {reference['line']})"
+                    )
+            else:
+                print("  local_references: none")
             print(f"  dependents: {', '.join(data['dependents']) or 'none'}")
         return 0
     if arguments.command == "graph":

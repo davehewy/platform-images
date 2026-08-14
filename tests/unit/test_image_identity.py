@@ -37,6 +37,43 @@ def test_resolver_matches_logical_canonical_and_legacy_image_identities() -> Non
     assert not resolver.is_managed("docker.io/library/ubuntu:24.04")
 
 
+def test_resolver_matches_any_qualified_reference_with_an_exact_local_basename() -> None:
+    resolver = build_image_identity_resolver(
+        {"ubuntu24-04-base"},
+        "platform-images",
+    )
+
+    assert resolver.candidates("nexus.example.com/gitlab-runner/ubuntu24-04-base:latest") == {
+        "ubuntu24-04-base"
+    }
+    assert resolver.candidates("ghcr.io/team/ubuntu24-04-base@sha256:abc") == {"ubuntu24-04-base"}
+
+
+def test_explicit_external_repository_suppresses_automatic_basename_matching() -> None:
+    resolver = build_image_identity_resolver(
+        {"base"},
+        "platform-images",
+        external_repositories={"docker.io/vendor/base"},
+    )
+
+    assert not resolver.candidates("docker.io/vendor/base:latest")
+    assert resolver.is_explicit_external("docker.io/vendor/base:latest")
+    assert not resolver.probable_local_targets("docker.io/vendor/base:latest")
+    assert resolver.candidates("nexus.example.com/team/base:latest") == {"base"}
+
+
+def test_resolver_reports_only_strong_probable_local_matches() -> None:
+    resolver = build_image_identity_resolver(
+        {"ubuntu24-04-base", "application"},
+        "platform-images",
+    )
+
+    assert resolver.probable_local_targets(
+        "nexus.example.com/gitlab-runner/ubuntu24-base:latest"
+    ) == ("ubuntu24-04-base",)
+    assert not resolver.probable_local_targets("docker.io/library/ubuntu:24.04")
+
+
 def test_resolver_exposes_identity_collisions_without_guessing() -> None:
     resolver = build_image_identity_resolver(
         {"base", "legacy"},

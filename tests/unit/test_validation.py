@@ -170,6 +170,84 @@ def test_published_repository_joins_fully_qualified_reference_to_local_target(
     assert report.graph.direct_dependencies("application") == ("ubuntu-base-24-04",)
 
 
+def test_qualified_reference_with_exact_basename_is_local_without_image_configuration(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory(
+        {
+            "ubuntu24-04-base": "FROM alpine:3.22\n",
+            "application": ("FROM nexus.example.com/gitlab-runner/ubuntu24-04-base:latest\n"),
+        }
+    )
+
+    report = validate_repository(RepositoryConfig.load(root))
+
+    assert report.valid
+    assert not report.warnings
+    assert report.graph.direct_dependencies("application") == ("ubuntu24-04-base",)
+
+
+def test_qualified_near_match_warns_with_manual_mapping_configuration(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    source = "nexus.example.com/gitlab-runner/ubuntu24-base:latest"
+    root = repository_factory(
+        {
+            "ubuntu24-04-base": "FROM alpine:3.22\n",
+            "application": f"FROM {source}\n",
+        }
+    )
+
+    report = validate_repository(RepositoryConfig.load(root))
+
+    assert report.valid
+    issue = next(issue for issue in report.warnings if issue.code == "probable-local-reference")
+    assert "ubuntu24-04-base" in issue.message
+    assert '[images."ubuntu24-04-base"]' in (issue.hint or "")
+    assert 'aliases = ["nexus.example.com/gitlab-runner/ubuntu24-base"]' in (issue.hint or "")
+    assert 'repository = "gitlab-runner/ubuntu24-base"' in (issue.hint or "")
+    assert 'external_repositories = ["nexus.example.com/gitlab-runner/ubuntu24-base"]' in (
+        issue.hint or ""
+    )
+    assert report.graph.direct_dependencies("application") == ()
+
+    config_path = root / "platform-images.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        + '\n[images."ubuntu24-04-base"]\n'
+        + 'aliases = ["nexus.example.com/gitlab-runner/ubuntu24-base"]\n',
+        encoding="utf-8",
+    )
+    mapped_report = validate_repository(RepositoryConfig.load(root))
+    assert mapped_report.valid
+    assert not mapped_report.warnings
+    assert mapped_report.graph.direct_dependencies("application") == ("ubuntu24-04-base",)
+
+
+def test_explicit_external_repository_prevents_automatic_local_edge(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    source = "docker.io/vendor/base"
+    root = repository_factory(
+        {
+            "base": "FROM alpine:3.22\n",
+            "application": f"FROM {source}:latest\n",
+        }
+    )
+    config_path = root / "platform-images.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        + f'\n[identity]\nexternal_repositories = ["{source}"]\n',
+        encoding="utf-8",
+    )
+
+    report = validate_repository(RepositoryConfig.load(root))
+
+    assert report.valid
+    assert not report.warnings
+    assert report.graph.direct_dependencies("application") == ()
+
+
 def test_published_repository_alias_supports_a_legacy_remote_name(
     repository_factory: Callable[[dict[str, str]], Path],
 ) -> None:
@@ -384,7 +462,8 @@ def test_internal_typo_has_hint(repository_factory: Callable[[dict[str, str]], P
     )
     report = validate_repository(RepositoryConfig.load(root))
     issue = next(issue for issue in report.errors if issue.code == "missing-internal-target")
-    assert issue.hint == "possible match: base"
+    assert '[images."base"]' in (issue.hint or "")
+    assert 'aliases = ["registry.example/platform-images/bsae"]' in (issue.hint or "")
 
 
 def test_unqualified_local_typo_is_rejected_with_hint(
@@ -446,6 +525,29 @@ def test_short_external_allowlist_must_be_an_array(
         encoding="utf-8",
     )
     with pytest.raises(ConfigurationError, match="must be an array of strings"):
+        RepositoryConfig.load(root)
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        '"docker.io/vendor/base"',
+        '["docker.io/vendor/base:latest"]',
+        '["docker.io/vendor/base", "docker.io/vendor/base"]',
+    ),
+)
+def test_explicit_external_repositories_are_strictly_validated(
+    repository_factory: Callable[[dict[str, str]], Path], value: str
+) -> None:
+    root = repository_factory({"base": "FROM alpine\n"})
+    config_path = root / "platform-images.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        + f"\n[identity]\nexternal_repositories = {value}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError):
         RepositoryConfig.load(root)
 
 

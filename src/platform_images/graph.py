@@ -139,6 +139,7 @@ def build_graph(targets: Mapping[str, ImageTarget], config: RepositoryConfig) ->
         config.registry.namespace,
         repositories={name: config.image_repository(name) for name in names},
         aliases={name: config.image_aliases(name) for name in names},
+        external_repositories=config.identity.external_repositories,
     )
     parse_results: dict[str, DockerfileParseResult] = {}
     dependencies: dict[str, frozenset[str]] = {}

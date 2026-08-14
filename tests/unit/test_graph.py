@@ -108,3 +108,11 @@ def test_json_schema_and_order(repository_factory: Callable[[dict[str, str]], Pa
     assert list(data["targets"]) == ["base", "curl"]
     assert data["targets"]["base"]["dependents"] == ["curl"]
     assert data["targets"]["base"]["external_dependencies"] == ["alpine:3.22"]
+    assert data["targets"]["curl"]["local_references"] == [
+        {
+            "source": "base",
+            "target": "base",
+            "instruction": "FROM",
+            "line": 1,
+        }
+    ]

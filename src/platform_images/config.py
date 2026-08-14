@@ -50,6 +50,11 @@ class ImageConfig:
 
 
 @dataclass(frozen=True)
+class IdentityConfig:
+    external_repositories: frozenset[str]
+
+
+@dataclass(frozen=True)
 class DiscoveryConfig:
     roots: tuple[str, ...]
 
@@ -77,6 +82,7 @@ class RepositoryConfig:
     changes: ChangeConfig
     dockerfile: DockerfileConfig
     images: Mapping[str, ImageConfig]
+    identity: IdentityConfig
     discovery: DiscoveryConfig
     build: BuildConfig
 
@@ -109,6 +115,7 @@ class RepositoryConfig:
             change_data = data["changes"]
             dockerfile_data = data.get("dockerfile", {})
             image_data = data.get("images", {})
+            identity_data = data.get("identity", {})
             discovery_data = data.get("discovery", {})
             build_data = data.get("build", {})
             tags = TagConfig(
@@ -117,6 +124,18 @@ class RepositoryConfig:
             )
             raw_global_inputs = change_data["global_inputs"]
             raw_external_images = dockerfile_data.get("allowed_short_external_images", ())
+            if not isinstance(identity_data, dict):
+                raise TypeError("identity must be a table")
+            unexpected_identity_settings = sorted(set(identity_data) - {"external_repositories"})
+            if unexpected_identity_settings:
+                raise TypeError(
+                    "identity contains unknown settings: " + ", ".join(unexpected_identity_settings)
+                )
+            raw_external_repositories = identity_data.get("external_repositories", [])
+            if not isinstance(raw_external_repositories, list) or not all(
+                isinstance(reference, str) for reference in raw_external_repositories
+            ):
+                raise TypeError("identity.external_repositories must be an array of strings")
             configured_root = discovery_data.get("root")
             configured_roots = discovery_data.get("roots")
             if configured_root is not None and configured_roots is not None:
@@ -212,6 +231,24 @@ class RepositoryConfig:
                 "allowed_short_external_images entries must be unqualified repository names: "
                 + ", ".join(invalid_external_names)
             )
+        invalid_external_repositories = sorted(
+            reference
+            for reference in raw_external_repositories
+            if not reference
+            or reference != reference.casefold()
+            or "://" in reference
+            or "@" in reference
+            or any(character.isspace() for character in reference)
+            or repository_name(reference) != reference
+            or not IMAGE_ALIAS_RE.fullmatch(reference)
+        )
+        if invalid_external_repositories:
+            raise ConfigurationError(
+                "identity.external_repositories must contain lowercase image repositories "
+                "without tags or digests: " + ", ".join(invalid_external_repositories)
+            )
+        if len(raw_external_repositories) != len(set(raw_external_repositories)):
+            raise ConfigurationError("identity.external_repositories must be unique")
         for target_name, image in images.items():
             if not TARGET_NAME_RE.fullmatch(target_name):
                 raise ConfigurationError(f"invalid logical image target name: {target_name}")
@@ -272,6 +309,7 @@ class RepositoryConfig:
             changes=ChangeConfig(global_inputs),
             dockerfile=DockerfileConfig(allowed_short_external_images),
             images=dict(sorted(images.items())),
+            identity=IdentityConfig(frozenset(raw_external_repositories)),
             discovery=DiscoveryConfig(normalized_roots),
             build=BuildConfig(backend),
         )

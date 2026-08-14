@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import difflib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
 from platform_images.config import NAMESPACE_RE, RepositoryConfig
 from platform_images.discovery import inspect_targets, valid_target_name
 from platform_images.graph import ImageGraph, build_graph
-from platform_images.image_identity import build_image_identity_resolver
+from platform_images.image_identity import (
+    build_image_identity_resolver,
+    registry_relative_repository,
+    repository_name,
+)
 from platform_images.models import ImageTarget, ReferenceKind
 
 
@@ -46,6 +51,18 @@ def _relative(path: Path, root: Path) -> str:
         return str(path)
 
 
+def _manual_mapping_hint(reference: str, target: str) -> str:
+    repository = repository_name(reference)
+    relative = registry_relative_repository(repository)
+    return (
+        f"if this is local, add aliases = [{json.dumps(repository)}] under "
+        f"[images.{json.dumps(target)}]; if it is also the published destination, set "
+        f"repository = {json.dumps(relative)}; "
+        f"if it is intentionally external, add external_repositories = "
+        f"[{json.dumps(repository)}] under [identity]"
+    )
+
+
 def validate_repository(config: RepositoryConfig) -> ValidationReport:
     root = config.root
     discovery = inspect_targets(root, config.discovery.roots)
@@ -55,6 +72,7 @@ def validate_repository(config: RepositoryConfig) -> ValidationReport:
         config.registry.namespace,
         repositories={name: config.image_repository(name) for name in targets},
         aliases={name: config.image_aliases(name) for name in targets},
+        external_repositories=config.identity.external_repositories,
     )
     graph = build_graph(targets, config)
     issues: list[ValidationIssue] = []
@@ -197,8 +215,7 @@ def validate_repository(config: RepositoryConfig) -> ValidationReport:
                 reference.resolved
             )
             if internal:
-                candidate = reference.resolved.rsplit("/", 1)[-1].split(":", 1)[0]
-                matches = difflib.get_close_matches(candidate, targets, n=1)
+                matches = image_identities.probable_local_targets(reference.resolved)
                 issues.append(
                     ValidationIssue(
                         "missing-internal-target",
@@ -206,7 +223,7 @@ def validate_repository(config: RepositoryConfig) -> ValidationReport:
                         f"internal image target does not exist: {reference.raw}",
                         dockerfile_path,
                         reference.line_number,
-                        f"possible match: {matches[0]}" if matches else None,
+                        _manual_mapping_hint(reference.resolved, matches[0]) if matches else None,
                     )
                 )
             elif reference.resolved is not None and "/" not in reference.resolved.split("@", 1)[0]:
@@ -238,6 +255,23 @@ def validate_repository(config: RepositoryConfig) -> ValidationReport:
                         reference.line_number,
                     )
                 )
+        for reference in graph.external_dependencies[target_name]:
+            if reference.resolved is None:
+                continue
+            matches = image_identities.probable_local_targets(reference.resolved)
+            if not matches:
+                continue
+            issues.append(
+                ValidationIssue(
+                    "probable-local-reference",
+                    "warning",
+                    f"qualified image reference resembles local target {matches[0]!r} but is "
+                    f"currently external: {reference.raw}",
+                    dockerfile_path,
+                    reference.line_number,
+                    _manual_mapping_hint(reference.resolved, matches[0]),
+                )
+            )
         for alias, line in graph.parse_results[target_name].stage_aliases:
             if alias in targets:
                 issues.append(

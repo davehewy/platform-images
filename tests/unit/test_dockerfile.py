@@ -38,9 +38,11 @@ def test_configured_namespace_resolves_local(reference: str) -> None:
     assert parsed.references[0].resolved == "base"
 
 
-def test_arbitrary_basename_match_is_external() -> None:
+def test_qualified_exact_basename_match_is_local_without_registry_configuration() -> None:
     reference = parse("FROM unrelated.example/team/base:latest\n").references[0]
-    assert reference.kind is ReferenceKind.EXTERNAL_IMAGE
+    assert reference.kind is ReferenceKind.LOCAL_TARGET
+    assert reference.resolved == "base"
+    assert reference.source == "unrelated.example/team/base:latest"
 
 
 def test_platform_multistage_and_alias_order() -> None:

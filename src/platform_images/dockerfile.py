@@ -114,6 +114,8 @@ def _classify(
             ReferenceKind.LOCAL_TARGET,
             source=resolved,
         )
+    if image_identities.is_explicit_external(repository):
+        return ImageReference(raw, resolved, instruction, line_number, ReferenceKind.EXTERNAL_IMAGE)
     if candidates or image_identities.is_managed(repository):
         return ImageReference(raw, resolved, instruction, line_number, ReferenceKind.UNRESOLVED)
     if "/" not in repository and repository not in allowed_short_external_images:

@@ -262,11 +262,6 @@ def test_ci_build_replaces_the_exact_qualified_dependency_source(
             "application": f"FROM {source}\n",
         }
     )
-    config_path = root / "platform-images.toml"
-    config_path.write_text(
-        config_path.read_text(encoding="utf-8") + '\n[images.base]\nrepository = "gitlab/base"\n',
-        encoding="utf-8",
-    )
     graph = build_graph(discover_targets(root), RepositoryConfig.load(root))
     runner = RecordingRunner()
     planned_base = "registry.example/gitlab/base@sha256:" + "a" * 64

@@ -10,16 +10,18 @@ and testable.
    configured `discovery.roots` entry to an immutable `ImageTarget`; other directories are ignored.
    The default root is `["images"]`, but roots may be nested anywhere within the repository.
    Logical target names are global and case-insensitively unique across all roots.
-2. **Identity resolver and parser** map short logical names, canonical published repositories, and
-   configured legacy aliases onto one target before reading global `ARG` defaults, `FROM`,
-   `COPY`/`ADD --from`, and `RUN --mount=from`. Tags and digests do not determine identity, while
-   the exact expanded source spelling is retained for build-context replacement. Heredoc bodies
-   remain excluded.
+2. **Identity resolver and parser** map short logical names, qualified references with an exact
+   logical basename, canonical published repositories, and configured exceptional aliases onto one
+   target before reading global `ARG` defaults, `FROM`, `COPY`/`ADD --from`, and
+   `RUN --mount=from`. Tags and digests do not determine identity, while the exact expanded source
+   spelling is retained for build-context replacement. Explicit external exceptions win over
+   automatic basename inference; heredoc bodies remain excluded.
 3. **Graph** is authoritative as `dependencies[consumer]` and `dependents[input]`. JSON is the
    machine contract; the tree is only a human projection and repeats multi-parent DAG nodes.
 4. **Validation** rejects unsafe names and paths, ambiguous build files, missing discovery roots,
    unresolved/internal references, unapproved short external names, stage-name collisions, and
-   complete deterministic cycle paths.
+   complete deterministic cycle paths. Strong qualified near-matches remain external but produce
+   an actionable mapping warning rather than a guessed graph edge.
 5. **Changes** parses NUL-delimited, rename-aware Git output and maps image paths or global inputs
    to directly changed targets. Controller, lock, configuration, and pipeline paths are mandatory
    global inputs in code, so a configuration edit cannot disable its own rebuild. Deleted targets
@@ -90,5 +92,7 @@ Unqualified image repositories are ambiguous because Docker normally interprets 
 and `FROM alpine` as short registry names. The controller resolves a discovered target as local,
 accepts `scratch`, and accepts only the additional external short names explicitly listed in
 `dockerfile.allowed_short_external_images`. All other unqualified names fail validation. A
-registry-qualified reference remains external unless it matches a target's canonical published
-repository or alias, or lies beneath one of those managed repository prefixes.
+registry-qualified reference resolves locally when its final repository component exactly matches
+a unique logical target, canonical published repository, or alias. Strong but inexact matches stay
+external and produce a warning; explicit `identity.external_repositories` entries suppress
+intentional collisions.

@@ -213,15 +213,111 @@ def test_init_infers_published_repository_and_graphs_qualified_reference(
     assert main(["init"], cwd=root, environment={}) == 0
 
     config = RepositoryConfig.load(root)
+    assert config.registry.namespace == "gitlab"
     assert config.image_repository("ubuntu-base-24-04") == "gitlab/ubuntu-base-24-04"
+    assert not config.images
     output = capsys.readouterr().out
-    assert "Published image repositories inferred from build-file references:" in output
-    assert "ubuntu-base-24-04: gitlab/ubuntu-base-24-04" in output
+    assert "Output registry namespace inferred from qualified local references: gitlab" in output
 
     assert main(["images", "graph"], cwd=root, environment={}) == 0
     assert capsys.readouterr().out == (
         "Container image dependency graph\n└── ubuntu-base-24-04\n    └── application\n"
     )
+
+    assert main(["images", "show", "application"], cwd=root, environment={}) == 0
+    show_output = capsys.readouterr().out
+    assert "local_references:" in show_output
+    assert "nexus.example.com/gitlab/ubuntu-base-24-04:latest -> ubuntu-base-24-04" in show_output
+
+
+def test_init_warns_when_qualified_source_probably_uses_a_different_local_name(
+    tmp_path: Path, capsys
+) -> None:
+    root = tmp_path / "repository"
+    target_root = root / "containers"
+    base = target_root / "ubuntu24-04-base"
+    application = target_root / "application"
+    base.mkdir(parents=True)
+    application.mkdir(parents=True)
+    (base / "Dockerfile").write_text("FROM ubuntu:24.04\n", encoding="utf-8")
+    (application / "Dockerfile").write_text(
+        "FROM nexus.example.com/gitlab-runner/ubuntu24-base:latest\n",
+        encoding="utf-8",
+    )
+
+    assert main(["init"], cwd=root, environment={}) == 0
+
+    output = capsys.readouterr().out
+    assert "Initial validation passed (2 image targets)." in output
+    assert "Warnings: 1" in output
+    assert "[probable-local-reference]" in output
+    assert '[images."ubuntu24-04-base"]' in output
+    assert 'aliases = ["nexus.example.com/gitlab-runner/ubuntu24-base"]' in output
+
+    assert main(["images", "validate"], cwd=root, environment={}) == 0
+    validation_output = capsys.readouterr().out
+    assert "Warnings: 1" in validation_output
+    assert (
+        'external_repositories = ["nexus.example.com/gitlab-runner/ubuntu24-base"]'
+        in validation_output
+    )
+
+
+def test_init_explicit_namespace_keeps_one_uniform_output_policy(tmp_path: Path, capsys) -> None:
+    root = tmp_path / "repository"
+    base = root / "containers" / "base"
+    application = root / "containers" / "application"
+    base.mkdir(parents=True)
+    application.mkdir(parents=True)
+    (base / "Dockerfile").write_text("FROM alpine\n", encoding="utf-8")
+    (application / "Dockerfile").write_text(
+        "FROM nexus.example.com/legacy-team/base:latest\n",
+        encoding="utf-8",
+    )
+
+    assert main(["init", "--namespace", "owned/team"], cwd=root, environment={}) == 0
+
+    config = RepositoryConfig.load(root)
+    assert config.registry.namespace == "owned/team"
+    assert not config.images
+    report = validate_repository(config)
+    assert report.valid
+    assert report.graph.direct_dependencies("application") == ("base",)
+    assert "Output registry namespace inferred" not in capsys.readouterr().out
+
+
+def test_init_accepts_multiple_source_registries_without_per_image_inventory(
+    tmp_path: Path, capsys
+) -> None:
+    root = tmp_path / "repository"
+    targets = root / "containers"
+    base = targets / "base"
+    first = targets / "first"
+    second = targets / "second"
+    for directory in (base, first, second):
+        directory.mkdir(parents=True)
+    (base / "Dockerfile").write_text("FROM alpine\n", encoding="utf-8")
+    (first / "Dockerfile").write_text(
+        "FROM nexus.example.com/gitlab-runner/base:latest\n",
+        encoding="utf-8",
+    )
+    (second / "Dockerfile").write_text(
+        "FROM ghcr.io/acme/base:v2\n",
+        encoding="utf-8",
+    )
+
+    assert main(["init"], cwd=root, environment={}) == 0
+
+    config = RepositoryConfig.load(root)
+    assert config.registry.namespace == "repository"
+    assert not config.images
+    report = validate_repository(config)
+    assert report.valid
+    assert report.graph.direct_dependencies("first") == ("base",)
+    assert report.graph.direct_dependencies("second") == ("base",)
+    output = capsys.readouterr().out
+    assert "Qualified local-reference namespaces detected: acme, gitlab-runner" in output
+    assert "build outputs use registry namespace: repository" in output
 
 
 def test_init_rejects_repository_root_build_file(tmp_path: Path, capsys) -> None:

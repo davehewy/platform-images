@@ -7,10 +7,12 @@
 2. Use a logical local target name in `FROM`, `COPY`/`ADD --from`, or `RUN --mount=from` when
    appropriate, for example `FROM base`. Do not add image metadata merely to describe an
    inferable dependency.
-   Prefer that short logical name for images owned by the same repository. If an existing build
-   file must retain a fully qualified reference, declare its registry-relative output path under
-   `[images.<target>].repository`; use tagless `aliases` only for legacy repository names. The
-   planner replaces either spelling with the exact planned parent image during the build.
+   Prefer that short logical name for images owned by the same repository. An existing qualified
+   reference is also automatic when its final repository component exactly matches a unique local
+   target, regardless of registry hostname, intermediate path, tag, or digest. Use
+   `[images.<target>].repository` or a tagless `aliases` entry only when the local and remote names
+   differ.
+   `platform images validate` prints the exact mapping to add for strong near-matches.
    Run builds through `platform images build` or generated CI so those named contexts are present;
    a plain container build command may try to pull the logical name.
    If a new external base uses an unqualified name such as `debian`, add that repository name to
@@ -29,4 +31,5 @@ unless they are intentionally shared and listed as a global controller input.
 
 An internal repository reference whose target does not exist, an identity claimed by multiple
 targets, an unresolved build-time-only `ARG`, or a local dependency cycle fails validation before a
-build plan can be generated.
+build plan can be generated. A qualified near-match is reported as a warning and remains external
+until it is mapped; add it to `identity.external_repositories` instead when that is intentional.
