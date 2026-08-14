@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.9.1 (2026-08-14)
+
+### Bug Fixes
+
+- **release**: Preserve archive version after smoke check
+  ([`3c7d31f`](https://github.com/davehewy/platform-images/commit/3c7d31f9d79199fb124c2b3d4a7edf6ccc264128))
+
+
 ## v0.9.0 (2026-08-14)
 
 ### Features
