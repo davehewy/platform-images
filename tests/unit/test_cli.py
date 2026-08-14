@@ -179,6 +179,22 @@ def test_init_supports_nested_inferred_roots(tmp_path: Path, capsys) -> None:
     assert "containers/service/images" in output
 
 
+def test_init_then_graph_ignores_non_image_directories(tmp_path: Path, capsys) -> None:
+    root = tmp_path / "repository"
+    target_root = root / "utils" / "container-images"
+    api = target_root / "api"
+    api.mkdir(parents=True)
+    (api / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    for name in ("docs", "generated", "fixtures", "2"):
+        (target_root / name).mkdir()
+
+    assert main(["init"], cwd=root, environment={}) == 0
+    capsys.readouterr()
+
+    assert main(["images", "graph"], cwd=root, environment={}) == 0
+    assert capsys.readouterr().out == "api\n"
+
+
 def test_init_rejects_repository_root_build_file(tmp_path: Path, capsys) -> None:
     root = tmp_path / "repository"
     root.mkdir()

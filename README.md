@@ -201,6 +201,8 @@ platform init
 `init` scans for existing `Dockerfile` and `Containerfile` targets, infers their parent directories
 as discovery roots, and writes a Docker-based starter `platform-images.toml`. Discovery roots can
 live at any depth and can be nested—for example, `utils` and `utils/container-images` can coexist.
+Directories beneath those roots that do not contain either build filename are ordinary repository
+directories and are ignored.
 It also adds inferred short external bases such as `alpine` to the starter allowlist and prints
 them for review; references resembling a local target typo remain validation errors. It never
 moves an image, assumes a fixed root name, or overwrites an existing configuration.
@@ -1026,7 +1028,7 @@ promotion moves only the stable alias after success.
 
 | Setting | What it controls | When and why to change it |
 | --- | --- | --- |
-| `discovery.roots` | Non-empty array of repository-relative directories whose direct children are logical image targets. Defaults to `["images"]`. Nested roots delegate their branch to the more specific root unless the branch has its own build file. | Include each existing ownership area that contains image targets, whether central, service-local, deeply nested, or beneath another ownership area. Roots cannot be absolute, escape through `..`, or duplicate one another. |
+| `discovery.roots` | Non-empty array of repository-relative directories to search. A direct child is an image target only when it contains `Dockerfile` or `Containerfile`; every other directory is ignored. Defaults to `["images"]`. | Include each existing ownership area that contains image targets, whether central, service-local, deeply nested, or beneath another ownership area. Roots cannot be absolute, escape through `..`, or duplicate one another. |
 | `discovery.root` | Backward-compatible singular form for one root. | Existing configurations may keep it. New configurations should use `roots`, even for one location, so adding another is a one-line change. Do not set both forms. |
 
 For example, this discovers `base`, `api`, and `worker` without a registration list:

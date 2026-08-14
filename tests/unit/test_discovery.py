@@ -28,6 +28,24 @@ def test_discovers_containerfile_when_dockerfile_is_absent(
     assert discover_targets(root)["base"].dockerfile == containerfile
 
 
+def test_ignores_directories_without_a_build_file(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory(
+        {
+            "api": "FROM scratch\n",
+            "docs": "<missing>",
+            "generated": "<missing>",
+            "Bad Non Image Name": "<missing>",
+        }
+    )
+
+    discovery = inspect_targets(root)
+
+    assert list(discovery.targets) == ["api"]
+    assert [entry.name for entry in discovery.entries] == ["api"]
+
+
 def test_discovers_targets_below_a_configurable_nested_root(
     repository_factory: Callable[[dict[str, str]], Path],
 ) -> None:

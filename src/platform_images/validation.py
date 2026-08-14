@@ -92,16 +92,7 @@ def validate_repository(config: RepositoryConfig) -> ValidationReport:
             for candidate in (target.directory / "Dockerfile", target.directory / "Containerfile")
             if candidate.is_file()
         ]
-        if not build_files:
-            issues.append(
-                ValidationIssue(
-                    "missing-dockerfile",
-                    "error",
-                    "image target directory does not contain Dockerfile or Containerfile",
-                    path,
-                )
-            )
-        elif len(build_files) > 1:
+        if len(build_files) > 1:
             issues.append(
                 ValidationIssue(
                     "ambiguous-build-file",

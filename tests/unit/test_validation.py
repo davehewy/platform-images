@@ -21,11 +21,28 @@ def test_valid_repository(repository_factory: Callable[[dict[str, str]], Path]) 
     assert not report.warnings
 
 
-def test_invalid_name_and_missing_dockerfile(
+def test_invalid_name_with_build_file_is_rejected(
     repository_factory: Callable[[dict[str, str]], Path],
 ) -> None:
-    root = repository_factory({"Bad Name": "<missing>"})
-    assert codes(root) == {"invalid-target-name", "missing-dockerfile"}
+    root = repository_factory({"Bad Name": "FROM scratch\n"})
+    assert codes(root) == {"invalid-target-name"}
+
+
+def test_non_image_directories_do_not_create_validation_errors(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory(
+        {
+            "api": "FROM scratch\n",
+            "documentation": "<missing>",
+            "generated-output": "<missing>",
+        }
+    )
+
+    report = validate_repository(RepositoryConfig.load(root))
+
+    assert report.valid
+    assert list(report.graph.targets) == ["api"]
 
 
 def test_containerfile_is_valid_but_both_build_filenames_are_ambiguous(

@@ -6,17 +6,18 @@ and testable.
 
 ## Data flow
 
-1. **Discovery** maps every direct child of each configured `discovery.roots` entry to an immutable
-   `ImageTarget`. The default is `["images"]`, but the roots may be nested anywhere within the
-   repository. Logical target names are global and case-insensitively unique across all roots.
+1. **Discovery** maps each direct child containing a `Dockerfile` or `Containerfile` beneath a
+   configured `discovery.roots` entry to an immutable `ImageTarget`; other directories are ignored.
+   The default root is `["images"]`, but roots may be nested anywhere within the repository.
+   Logical target names are global and case-insensitively unique across all roots.
 2. **Parser** reads logical Dockerfile/Containerfile instructions, global `ARG` defaults, `FROM` sources, stage
    aliases, `COPY`/`ADD --from` sources, and `RUN --mount=from` sources while excluding heredoc
    bodies. It distinguishes local, external, stage, and unresolved references.
 3. **Graph** is authoritative as `dependencies[consumer]` and `dependents[input]`. JSON is the
    machine contract; the tree is only a human projection and repeats multi-parent DAG nodes.
-4. **Validation** rejects unsafe names and paths, missing or ambiguous build files, unresolved/internal
-   references, unapproved short external names, stage-name collisions, and complete deterministic
-   cycle paths.
+4. **Validation** rejects unsafe names and paths, ambiguous build files, missing discovery roots,
+   unresolved/internal references, unapproved short external names, stage-name collisions, and
+   complete deterministic cycle paths.
 5. **Changes** parses NUL-delimited, rename-aware Git output and maps image paths or global inputs
    to directly changed targets. Controller, lock, configuration, and pipeline paths are mandatory
    global inputs in code, so a configuration edit cannot disable its own rebuild. Deleted targets
