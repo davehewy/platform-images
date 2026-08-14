@@ -169,6 +169,31 @@ def test_build_command_uses_sorted_named_contexts_and_argument_list() -> None:
     ]
 
 
+def test_build_command_replaces_fully_qualified_dockerfile_image_source() -> None:
+    planned_base = "localhost/gitlab/ubuntu-base-24-04:dev"
+    target = BuildPlanTarget(
+        "application",
+        ("selected",),
+        ("ubuntu-base-24-04",),
+        ("ubuntu-base-24-04",),
+        "images/application/Dockerfile",
+        "images/application",
+        "localhost/gitlab/application:dev",
+        {"ubuntu-base-24-04": planned_base},
+        False,
+        {
+            "nexus.example.com/gitlab/ubuntu-base-24-04:latest": planned_base,
+            "ubuntu-base-24-04": planned_base,
+        },
+    )
+
+    command = build_command(target, builder=BuildBackend.DOCKER)
+
+    assert (
+        f"nexus.example.com/gitlab/ubuntu-base-24-04:latest=docker-image://{planned_base}"
+    ) in command
+
+
 def test_docker_buildx_uses_docker_image_contexts_and_loads_local_output() -> None:
     target = BuildPlanTarget(
         "app",
@@ -225,6 +250,45 @@ def test_docker_ci_build_pushes_with_buildx_and_reads_registry_digest(
     assert "--metadata-file" in build
     assert result["digest"] == DOCKER_DIGEST
     assert result["immutable_reference"] == f"registry/platform-images/base@{DOCKER_DIGEST}"
+
+
+def test_ci_build_replaces_the_exact_qualified_dependency_source(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    source = "nexus.example.com/gitlab/base:latest"
+    root = repository_factory(
+        {
+            "base": "FROM alpine\n",
+            "application": f"FROM {source}\n",
+        }
+    )
+    config_path = root / "platform-images.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8") + '\n[images.base]\nrepository = "gitlab/base"\n',
+        encoding="utf-8",
+    )
+    graph = build_graph(discover_targets(root), RepositoryConfig.load(root))
+    runner = RecordingRunner()
+    planned_base = "registry.example/gitlab/base@sha256:" + "a" * 64
+
+    execute_ci_build(
+        graph,
+        "application",
+        "registry.example/platform-images/application:sha-abc",
+        {"base": planned_base},
+        root=root,
+        environment={
+            "CI_COMMIT_SHA": "abc",
+            "CI_PROJECT_URL": "https://github.com/example/project",
+        },
+        runner=runner,  # type: ignore[arg-type]
+        builder=BuildBackend.DOCKER,
+        registry_transport=RegistryTransport.DOCKER,
+    )
+
+    build = runner.commands[1]
+    assert f"{source}=docker-image://{planned_base}" in build
+    assert f"base=docker-image://{planned_base}" in build
 
 
 @pytest.mark.parametrize(

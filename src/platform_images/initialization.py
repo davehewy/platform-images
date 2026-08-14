@@ -12,6 +12,11 @@ from platform_images.config import NAMESPACE_RE, RepositoryConfig
 from platform_images.discovery import inspect_targets
 from platform_images.dockerfile import parse_dockerfile
 from platform_images.errors import PlatformImagesError
+from platform_images.image_identity import (
+    build_image_identity_resolver,
+    registry_relative_repository,
+    repository_name,
+)
 from platform_images.models import BuildBackend, ReferenceKind, RegistryTransport
 
 CONFIGURATION_NAME = "platform-images.toml"
@@ -38,6 +43,7 @@ class InitializationResult:
     discovery_roots: tuple[str, ...]
     target_count: int
     allowed_short_external_images: tuple[str, ...]
+    image_repositories: tuple[tuple[str, str], ...]
 
 
 def _default_namespace(root: Path) -> str:
@@ -124,17 +130,61 @@ def _target_directories(root: Path, discovery_roots: tuple[str, ...]) -> tuple[P
     return tuple(directories)
 
 
-def _repository_name(reference: str) -> str:
-    without_digest = reference.split("@", 1)[0]
-    slash = without_digest.rfind("/")
-    colon = without_digest.rfind(":")
-    return without_digest[:colon] if colon > slash else without_digest
+def _infer_image_repositories(
+    target_directories: tuple[Path, ...], namespace: str
+) -> dict[str, str]:
+    target_names = frozenset(directory.name for directory in target_directories)
+    candidates: dict[str, set[str]] = {}
+    for directory in target_directories:
+        for build_file in (directory / "Dockerfile", directory / "Containerfile"):
+            if not build_file.is_file():
+                continue
+            try:
+                text = build_file.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                raise PlatformImagesError(f"unable to inspect {build_file}: {exc}") from exc
+            parsed = parse_dockerfile(
+                text,
+                target_names=target_names,
+                internal_namespace=namespace,
+            )
+            for reference in parsed.references:
+                if reference.resolved is None:
+                    continue
+                repository = repository_name(reference.resolved)
+                if "/" not in repository:
+                    continue
+                target_name = repository.rsplit("/", 1)[-1]
+                if target_name in target_names:
+                    candidates.setdefault(target_name, set()).add(
+                        registry_relative_repository(repository)
+                    )
+
+    inferred: dict[str, str] = {}
+    for target_name, repositories in sorted(candidates.items()):
+        if len(repositories) > 1:
+            raise PlatformImagesError(
+                f"conflicting published repositories inferred for image target {target_name}: "
+                + ", ".join(sorted(repositories))
+                + "; rerun init with a consistent reference or configure [images] manually"
+            )
+        repository = next(iter(repositories))
+        if repository != f"{namespace}/{target_name}":
+            inferred[target_name] = repository
+    return inferred
 
 
 def _infer_short_external_images(
-    target_directories: tuple[Path, ...], namespace: str
+    target_directories: tuple[Path, ...],
+    namespace: str,
+    image_repositories: dict[str, str],
 ) -> tuple[str, ...]:
     target_names = frozenset(directory.name for directory in target_directories)
+    identities = build_image_identity_resolver(
+        target_names,
+        namespace,
+        repositories=image_repositories,
+    )
     external_images: set[str] = set()
     for directory in target_directories:
         build_files = [
@@ -151,11 +201,12 @@ def _infer_short_external_images(
                 text,
                 target_names=target_names,
                 internal_namespace=namespace,
+                image_identities=identities,
             )
             for reference in parsed.references:
                 if reference.kind is not ReferenceKind.UNRESOLVED or reference.resolved is None:
                     continue
-                repository = _repository_name(reference.resolved)
+                repository = repository_name(reference.resolved)
                 resembles_local_target = difflib.get_close_matches(
                     repository, target_names, n=1, cutoff=0.75
                 )
@@ -180,6 +231,7 @@ def _configuration_text(
     namespace: str,
     discovery_roots: tuple[str, ...],
     allowed_short_external_images: tuple[str, ...],
+    image_repositories: dict[str, str],
     builder: BuildBackend,
     transport: RegistryTransport,
 ) -> str:
@@ -188,6 +240,10 @@ def _configuration_text(
         ".gitlab/**",
         ".gitlab-ci.yml",
         CONFIGURATION_NAME,
+    )
+    image_configuration = "".join(
+        f"\n[images.{json.dumps(target)}]\nrepository = {json.dumps(repository)}\n"
+        for target, repository in sorted(image_repositories.items())
     )
     return f"""\
 [registry]
@@ -202,6 +258,7 @@ commit_prefix = "sha"
 
 [build]
 backend = {json.dumps(builder.value)}
+{image_configuration}
 
 [dockerfile]
 allowed_short_external_images = {_toml_array(allowed_short_external_images)}
@@ -242,11 +299,17 @@ def initialize_repository(
         _normalize_roots(root, discovery_roots) if discovery_roots else _infer_roots(root)
     )
     target_directories = _target_directories(root, configured_roots)
-    external_images = _infer_short_external_images(target_directories, configured_namespace)
+    image_repositories = _infer_image_repositories(target_directories, configured_namespace)
+    external_images = _infer_short_external_images(
+        target_directories,
+        configured_namespace,
+        image_repositories,
+    )
     contents = _configuration_text(
         namespace=configured_namespace,
         discovery_roots=configured_roots,
         allowed_short_external_images=external_images,
+        image_repositories=image_repositories,
         builder=builder,
         transport=selected_transport,
     )
@@ -268,4 +331,5 @@ def initialize_repository(
         configured_roots,
         len(target_directories),
         external_images,
+        tuple(sorted(image_repositories.items())),
     )

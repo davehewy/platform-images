@@ -10,9 +10,11 @@ and testable.
    configured `discovery.roots` entry to an immutable `ImageTarget`; other directories are ignored.
    The default root is `["images"]`, but roots may be nested anywhere within the repository.
    Logical target names are global and case-insensitively unique across all roots.
-2. **Parser** reads logical Dockerfile/Containerfile instructions, global `ARG` defaults, `FROM` sources, stage
-   aliases, `COPY`/`ADD --from` sources, and `RUN --mount=from` sources while excluding heredoc
-   bodies. It distinguishes local, external, stage, and unresolved references.
+2. **Identity resolver and parser** map short logical names, canonical published repositories, and
+   configured legacy aliases onto one target before reading global `ARG` defaults, `FROM`,
+   `COPY`/`ADD --from`, and `RUN --mount=from`. Tags and digests do not determine identity, while
+   the exact expanded source spelling is retained for build-context replacement. Heredoc bodies
+   remain excluded.
 3. **Graph** is authoritative as `dependencies[consumer]` and `dependents[input]`. JSON is the
    machine contract; the tree is only a human projection and repeats multi-parent DAG nodes.
 4. **Validation** rejects unsafe names and paths, ambiguous build files, missing discovery roots,
@@ -24,7 +26,8 @@ and testable.
    are reported, never deleted from ECR.
 6. **Affected calculation** follows downstream dependents from directly changed images.
 7. **Planner** topologically orders only the rebuild set and resolves every output, dependency
-   input, reason, and in-plan `needs` edge without building anything.
+   input, Dockerfile source-to-exact-image context, reason, and in-plan `needs` edge without
+   building anything.
 8. **Executor** translates plan targets into argument-array Docker Buildx, Podman, Buildah, or
    nerdctl calls. Logical dependencies are bound through exact named `docker-image://` or
    `container-image://` contexts.
@@ -70,6 +73,10 @@ multi-root DAG; CI guards the 100-image deep-leaf case against algorithmic regre
 | Stable input/alias | `<registry>/platform-images/<target>:main` |
 | Semantic release | `<registry>/platform-images/<target>:v<semver>` |
 
+`platform-images/<target>` is the default repository path in this example. A target-specific
+`images.<target>.repository` replaces that path consistently in local, commit, stable, and semantic
+references.
+
 Dependencies built in the same plan use that plan's unique output. Dependencies outside a partial
 plan resolve `main` through ECR and are injected by immutable digest. A missing stable dependency
 fails the plan; the controller never silently builds unrelated upstream images.
@@ -83,5 +90,5 @@ Unqualified image repositories are ambiguous because Docker normally interprets 
 and `FROM alpine` as short registry names. The controller resolves a discovered target as local,
 accepts `scratch`, and accepts only the additional external short names explicitly listed in
 `dockerfile.allowed_short_external_images`. All other unqualified names fail validation. A
-registry-qualified reference remains external unless it lies beneath the configured internal
-namespace.
+registry-qualified reference remains external unless it matches a target's canonical published
+repository or alias, or lies beneath one of those managed repository prefixes.

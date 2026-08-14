@@ -146,6 +146,119 @@ def test_multiple_discovery_roots_load_and_resolve_cross_root_dependencies(
     assert report.graph.targets["base"].context == base
 
 
+def test_published_repository_joins_fully_qualified_reference_to_local_target(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory(
+        {
+            "ubuntu-base-24-04": "FROM alpine:3.22\n",
+            "application": ("FROM nexus.example.com/gitlab/ubuntu-base-24-04:latest\n"),
+        }
+    )
+    config_path = root / "platform-images.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        + '\n[images.ubuntu-base-24-04]\nrepository = "gitlab/ubuntu-base-24-04"\n',
+        encoding="utf-8",
+    )
+
+    config = RepositoryConfig.load(root)
+    report = validate_repository(config)
+
+    assert report.valid
+    assert config.image_repository("ubuntu-base-24-04") == "gitlab/ubuntu-base-24-04"
+    assert report.graph.direct_dependencies("application") == ("ubuntu-base-24-04",)
+
+
+def test_published_repository_alias_supports_a_legacy_remote_name(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory(
+        {
+            "base": "FROM alpine\n",
+            "application": "FROM old-nexus.example.com:5000/legacy/base:main\n",
+        }
+    )
+    config_path = root / "platform-images.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        + """
+[images.base]
+repository = "gitlab/base"
+aliases = ["old-nexus.example.com:5000/legacy/base"]
+""",
+        encoding="utf-8",
+    )
+
+    report = validate_repository(RepositoryConfig.load(root))
+
+    assert report.valid
+    assert report.graph.direct_dependencies("application") == ("base",)
+
+
+def test_duplicate_published_image_identity_is_rejected(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory({"base": "FROM alpine\n", "legacy": "FROM busybox\n"})
+    config_path = root / "platform-images.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        + """
+[images.base]
+repository = "gitlab/base"
+
+[images.legacy]
+aliases = ["nexus.example.com/gitlab/base"]
+""",
+        encoding="utf-8",
+    )
+
+    report = validate_repository(RepositoryConfig.load(root))
+
+    issue = next(issue for issue in report.errors if issue.code == "duplicate-image-identity")
+    assert "base, legacy" in issue.message
+
+
+def test_stale_image_identity_configuration_is_rejected(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory({"base": "FROM alpine\n"})
+    config_path = root / "platform-images.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        + '\n[images.removed]\nrepository = "gitlab/removed"\n',
+        encoding="utf-8",
+    )
+
+    report = validate_repository(RepositoryConfig.load(root))
+
+    assert {issue.code for issue in report.errors} == {"unknown-image-configuration"}
+
+
+@pytest.mark.parametrize(
+    "image_configuration",
+    (
+        '[images.base]\nrepository = "nexus.example.com/gitlab/base"\n',
+        '[images.base]\nrepository = "gitlab/base:latest"\n',
+        '[images.base]\naliases = ["nexus.example.com/gitlab/base:latest"]\n',
+        '[images.base]\naliases = ["nexus.example.com/invalid/"]\n',
+    ),
+)
+def test_invalid_published_image_configuration_is_rejected(
+    repository_factory: Callable[[dict[str, str]], Path],
+    image_configuration: str,
+) -> None:
+    root = repository_factory({"base": "FROM alpine\n"})
+    config_path = root / "platform-images.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8") + "\n" + image_configuration,
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError):
+        RepositoryConfig.load(root)
+
+
 def test_legacy_single_discovery_root_remains_supported(
     repository_factory: Callable[[dict[str, str]], Path],
 ) -> None:

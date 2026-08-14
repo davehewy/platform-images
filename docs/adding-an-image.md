@@ -7,6 +7,12 @@
 2. Use a logical local target name in `FROM`, `COPY`/`ADD --from`, or `RUN --mount=from` when
    appropriate, for example `FROM base`. Do not add image metadata merely to describe an
    inferable dependency.
+   Prefer that short logical name for images owned by the same repository. If an existing build
+   file must retain a fully qualified reference, declare its registry-relative output path under
+   `[images.<target>].repository`; use tagless `aliases` only for legacy repository names. The
+   planner replaces either spelling with the exact planned parent image during the build.
+   Run builds through `platform images build` or generated CI so those named contexts are present;
+   a plain container build command may try to pull the logical name.
    If a new external base uses an unqualified name such as `debian`, add that repository name to
    `dockerfile.allowed_short_external_images` in `platform-images.toml`; alternatively use a
    registry-qualified reference. This explicit distinction catches local dependency typos.
@@ -21,5 +27,6 @@
 The build context is the target directory. Keep scripts, `.containerignore`, and copied files there
 unless they are intentionally shared and listed as a global controller input.
 
-An internal namespace reference whose target does not exist, an unresolved build-time-only `ARG`,
-or a local dependency cycle fails validation before a build plan can be generated.
+An internal repository reference whose target does not exist, an identity claimed by multiple
+targets, an unresolved build-time-only `ARG`, or a local dependency cycle fails validation before a
+build plan can be generated.

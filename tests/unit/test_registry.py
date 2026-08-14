@@ -7,7 +7,7 @@ import pytest
 
 from platform_images.config import RepositoryConfig
 from platform_images.errors import MissingStableImageError, ProcessError, RegistryError
-from platform_images.models import RegistryTransport
+from platform_images.models import BuildMode, RegistryTransport
 from platform_images.process import ProcessResult
 from platform_images.references import ReferencePolicy, immutable_reference
 from platform_images.registry import (
@@ -51,6 +51,36 @@ def test_reference_policy(repository_factory: Callable[[dict[str, str]], Path]) 
     assert immutable_reference(policy.stable("base"), "sha256:x") == (
         "registry.example.com/platform-images/base@sha256:x"
     )
+
+
+def test_reference_policy_uses_target_published_repository(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory({"ubuntu-base-24-04": "FROM alpine\n"})
+    config_path = root / "platform-images.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        + "\n[images.ubuntu-base-24-04]\n"
+        + 'repository = "gitlab/ubuntu-base-24-04"\n',
+        encoding="utf-8",
+    )
+    policy = ReferencePolicy(RepositoryConfig.load(root), "nexus.example.com", "12")
+
+    assert policy.local("ubuntu-base-24-04") == ("localhost/gitlab/ubuntu-base-24-04:dev")
+    assert policy.stable("ubuntu-base-24-04") == ("nexus.example.com/gitlab/ubuntu-base-24-04:main")
+    assert policy.output("ubuntu-base-24-04", BuildMode.DEFAULT_BRANCH, "abc") == (
+        "nexus.example.com/gitlab/ubuntu-base-24-04:sha-abc"
+    )
+
+    runner = RegistryRunner("sha256:abc\n")
+    ecr_registry = "123456789012.dkr.ecr.eu-west-2.amazonaws.com"
+    resolved = ECRRegistryClient(
+        policy.config,
+        ecr_registry,
+        runner,  # type: ignore[arg-type]
+    ).resolve_stable("ubuntu-base-24-04")
+    assert resolved == f"{ecr_registry}/gitlab/ubuntu-base-24-04@sha256:abc"
+    assert "gitlab/ubuntu-base-24-04" in runner.commands[0]
 
 
 def test_ecr_resolver_returns_immutable_digest(

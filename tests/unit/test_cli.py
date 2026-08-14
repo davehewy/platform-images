@@ -195,6 +195,35 @@ def test_init_then_graph_ignores_non_image_directories(tmp_path: Path, capsys) -
     assert capsys.readouterr().out == "Container image dependency graph\n└── api\n"
 
 
+def test_init_infers_published_repository_and_graphs_qualified_reference(
+    tmp_path: Path, capsys
+) -> None:
+    root = tmp_path / "repository"
+    target_root = root / "utils" / "container-images"
+    base = target_root / "ubuntu-base-24-04"
+    application = target_root / "application"
+    base.mkdir(parents=True)
+    application.mkdir(parents=True)
+    (base / "Dockerfile").write_text("FROM ubuntu:24.04\n", encoding="utf-8")
+    (application / "Dockerfile").write_text(
+        "FROM nexus.example.com/gitlab/ubuntu-base-24-04:latest\n",
+        encoding="utf-8",
+    )
+
+    assert main(["init"], cwd=root, environment={}) == 0
+
+    config = RepositoryConfig.load(root)
+    assert config.image_repository("ubuntu-base-24-04") == "gitlab/ubuntu-base-24-04"
+    output = capsys.readouterr().out
+    assert "Published image repositories inferred from build-file references:" in output
+    assert "ubuntu-base-24-04: gitlab/ubuntu-base-24-04" in output
+
+    assert main(["images", "graph"], cwd=root, environment={}) == 0
+    assert capsys.readouterr().out == (
+        "Container image dependency graph\n└── ubuntu-base-24-04\n    └── application\n"
+    )
+
+
 def test_init_rejects_repository_root_build_file(tmp_path: Path, capsys) -> None:
     root = tmp_path / "repository"
     root.mkdir()
@@ -250,6 +279,32 @@ def test_list_validate_graph_and_dry_run(
         "--tag localhost/platform-images/curl:dev"
     )
     assert "base=container-image://localhost/platform-images/base:dev" in commands
+
+
+def test_show_reports_effective_published_repository_and_aliases(
+    repository_factory: Callable[[dict[str, str]], Path], capsys
+) -> None:
+    root = repository_factory({"base": "FROM alpine\n"})
+    config_path = root / "platform-images.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        + """
+[images.base]
+repository = "gitlab/base"
+aliases = ["old-nexus.example.com/legacy/base"]
+""",
+        encoding="utf-8",
+    )
+
+    assert main(["images", "show", "base"], cwd=root, environment={}) == 0
+    output = capsys.readouterr().out
+    assert "repository: gitlab/base" in output
+    assert "aliases: old-nexus.example.com/legacy/base" in output
+
+    assert main(["images", "show", "base", "--format", "json"], cwd=root, environment={}) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["repository"] == "gitlab/base"
+    assert data["aliases"] == ["old-nexus.example.com/legacy/base"]
 
 
 def test_graph_uses_ascii_tree_on_windows(

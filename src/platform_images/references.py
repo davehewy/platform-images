@@ -13,7 +13,7 @@ class ReferencePolicy:
     pipeline_id: str | None = None
 
     def local(self, target: str) -> str:
-        return f"localhost/{self.config.registry.namespace}/{target}:dev"
+        return f"localhost/{self.config.image_repository(target)}:dev"
 
     def output(self, target: str, mode: BuildMode, commit_sha: str) -> str:
         if mode is BuildMode.LOCAL:
@@ -25,11 +25,11 @@ class ReferencePolicy:
             tag = f"{self.config.tags.ci_prefix}-{self.pipeline_id}-{commit_sha}"
         else:
             tag = f"{self.config.tags.commit_prefix}-{commit_sha}"
-        return f"{registry}/{self.config.registry.namespace}/{target}:{tag}"
+        return f"{registry}/{self.config.image_repository(target)}:{tag}"
 
     def stable(self, target: str) -> str:
         return (
-            f"{self._registry()}/{self.config.registry.namespace}/{target}:"
+            f"{self._registry()}/{self.config.image_repository(target)}:"
             f"{self.config.registry.stable_tag}"
         )
 

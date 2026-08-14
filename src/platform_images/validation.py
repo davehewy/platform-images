@@ -7,6 +7,7 @@ from pathlib import Path
 from platform_images.config import NAMESPACE_RE, RepositoryConfig
 from platform_images.discovery import inspect_targets, valid_target_name
 from platform_images.graph import ImageGraph, build_graph
+from platform_images.image_identity import build_image_identity_resolver
 from platform_images.models import ImageTarget, ReferenceKind
 
 
@@ -49,6 +50,12 @@ def validate_repository(config: RepositoryConfig) -> ValidationReport:
     root = config.root
     discovery = inspect_targets(root, config.discovery.roots)
     targets = discovery.targets
+    image_identities = build_image_identity_resolver(
+        targets,
+        config.registry.namespace,
+        repositories={name: config.image_repository(name) for name in targets},
+        aliases={name: config.image_aliases(name) for name in targets},
+    )
     graph = build_graph(targets, config)
     issues: list[ValidationIssue] = []
 
@@ -70,6 +77,30 @@ def validate_repository(config: RepositoryConfig) -> ValidationReport:
                 "error",
                 f"invalid configured registry namespace: {config.registry.namespace!r}",
                 "platform-images.toml",
+            )
+        )
+
+    for configured_target in sorted(set(config.images) - set(targets)):
+        issues.append(
+            ValidationIssue(
+                "unknown-image-configuration",
+                "error",
+                f"image identity configuration refers to an undiscovered target: "
+                f"{configured_target}",
+                "platform-images.toml",
+                hint="correct the logical target name or remove the stale images entry",
+            )
+        )
+
+    for identity, candidates in sorted(image_identities.collisions.items()):
+        issues.append(
+            ValidationIssue(
+                "duplicate-image-identity",
+                "error",
+                f"image repository or alias maps to multiple local targets: {identity} -> "
+                + ", ".join(sorted(candidates)),
+                "platform-images.toml",
+                hint="make every images.<target>.repository and alias globally unique",
             )
         )
 
@@ -144,8 +175,26 @@ def validate_repository(config: RepositoryConfig) -> ValidationReport:
                 )
             )
         for reference in graph.unresolved_references[target_name]:
-            internal = (
-                reference.resolved is not None and config.registry.namespace in reference.resolved
+            identity_candidates = (
+                image_identities.candidates(reference.resolved)
+                if reference.resolved is not None
+                else frozenset()
+            )
+            if len(identity_candidates) > 1:
+                issues.append(
+                    ValidationIssue(
+                        "ambiguous-local-reference",
+                        "error",
+                        f"local image reference maps to multiple targets: {reference.raw} -> "
+                        + ", ".join(sorted(identity_candidates)),
+                        dockerfile_path,
+                        reference.line_number,
+                        "make the configured repositories and aliases unique",
+                    )
+                )
+                continue
+            internal = reference.resolved is not None and image_identities.is_managed(
+                reference.resolved
             )
             if internal:
                 candidate = reference.resolved.rsplit("/", 1)[-1].split(":", 1)[0]

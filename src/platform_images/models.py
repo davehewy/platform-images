@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
@@ -54,6 +54,7 @@ class ImageReference:
     line_number: int
     kind: ReferenceKind
     stage_alias: str | None = None
+    source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,7 @@ class BuildPlanTarget:
     output_ref: str
     input_refs: Mapping[str, str]
     push: bool
+    build_contexts: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

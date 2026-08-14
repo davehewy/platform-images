@@ -4,6 +4,11 @@ import re
 import shlex
 from dataclasses import dataclass
 
+from platform_images.image_identity import (
+    ImageIdentityResolver,
+    build_image_identity_resolver,
+    repository_name,
+)
 from platform_images.models import ImageReference, ReferenceKind
 
 VARIABLE_RE = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
@@ -78,22 +83,12 @@ def _resolve_variables(raw: str, arguments: dict[str, str]) -> str | None:
     return None if unresolved or "$" in resolved else resolved
 
 
-def _repository_name(reference: str) -> str:
-    without_digest = reference.split("@", 1)[0]
-    slash = without_digest.rfind("/")
-    colon = without_digest.rfind(":")
-    if colon > slash:
-        without_digest = without_digest[:colon]
-    return without_digest
-
-
 def _classify(
     raw: str,
     resolved: str | None,
     instruction: str,
     line_number: int,
-    targets: frozenset[str],
-    namespace: str,
+    image_identities: ImageIdentityResolver,
     stage_aliases: frozenset[str],
     allowed_short_external_images: frozenset[str],
 ) -> ImageReference:
@@ -108,21 +103,19 @@ def _classify(
             ReferenceKind.STAGE_ALIAS,
             stage_alias=resolved,
         )
-    repository = _repository_name(resolved)
-    if repository in targets:
-        return ImageReference(raw, repository, instruction, line_number, ReferenceKind.LOCAL_TARGET)
-    namespace_marker = f"/{namespace.strip('/')}/"
-    namespace_prefix = f"{namespace.strip('/')}/"
-    internal = namespace_marker in f"/{repository}" or repository.startswith(namespace_prefix)
-    if internal:
-        candidate = repository.rsplit("/", 1)[-1]
+    repository = repository_name(resolved)
+    candidates = image_identities.candidates(repository)
+    if len(candidates) == 1:
         return ImageReference(
             raw,
-            candidate if candidate in targets else resolved,
+            next(iter(candidates)),
             instruction,
             line_number,
-            ReferenceKind.LOCAL_TARGET if candidate in targets else ReferenceKind.UNRESOLVED,
+            ReferenceKind.LOCAL_TARGET,
+            source=resolved,
         )
+    if candidates or image_identities.is_managed(repository):
+        return ImageReference(raw, resolved, instruction, line_number, ReferenceKind.UNRESOLVED)
     if "/" not in repository and repository not in allowed_short_external_images:
         return ImageReference(
             raw,
@@ -140,7 +133,12 @@ def parse_dockerfile(
     target_names: frozenset[str],
     internal_namespace: str,
     allowed_short_external_images: frozenset[str] = frozenset({"scratch"}),
+    image_identities: ImageIdentityResolver | None = None,
 ) -> DockerfileParseResult:
+    identities = image_identities or build_image_identity_resolver(
+        target_names,
+        internal_namespace,
+    )
     arguments: dict[str, str] = {}
     aliases: list[tuple[str, int]] = []
     known_aliases: set[str] = set()
@@ -181,8 +179,7 @@ def parse_dockerfile(
                     resolved,
                     "FROM",
                     line_number,
-                    target_names,
-                    internal_namespace,
+                    identities,
                     frozenset(known_aliases | known_stage_indexes),
                     allowed_short_external_images,
                 )
@@ -210,8 +207,7 @@ def parse_dockerfile(
                         resolved,
                         f"{instruction} --from",
                         line_number,
-                        target_names,
-                        internal_namespace,
+                        identities,
                         frozenset(known_aliases | known_stage_indexes),
                         allowed_short_external_images,
                     )
@@ -233,8 +229,7 @@ def parse_dockerfile(
                             resolved,
                             "RUN --mount=from",
                             line_number,
-                            target_names,
-                            internal_namespace,
+                            identities,
                             frozenset(known_aliases | known_stage_indexes),
                             allowed_short_external_images,
                         )

@@ -38,6 +38,34 @@ def test_local_plan_is_topological_and_exact(
     assert not curl.push
 
 
+def test_qualified_local_reference_is_bound_to_exact_planned_build_context(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory(
+        {
+            "ubuntu-base-24-04": "FROM alpine\n",
+            "application": ("FROM nexus.example.com/gitlab/ubuntu-base-24-04:latest\n"),
+        }
+    )
+    config_path = root / "platform-images.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        + '\n[images.ubuntu-base-24-04]\nrepository = "gitlab/ubuntu-base-24-04"\n',
+        encoding="utf-8",
+    )
+    config, graph = state(root)
+
+    plan = local_plan(graph, config, frozenset({"application"}))
+    application = plan.targets[-1]
+    planned_base = "localhost/gitlab/ubuntu-base-24-04:dev"
+
+    assert application.input_refs == {"ubuntu-base-24-04": planned_base}
+    assert application.build_contexts == {
+        "nexus.example.com/gitlab/ubuntu-base-24-04:latest": planned_base,
+        "ubuntu-base-24-04": planned_base,
+    }
+
+
 def test_no_deps_keeps_input_binding_but_not_need(
     repository_factory: Callable[[dict[str, str]], Path],
 ) -> None:

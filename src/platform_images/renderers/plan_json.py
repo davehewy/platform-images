@@ -23,6 +23,7 @@ def plan_data(plan: BuildPlan) -> dict[str, object]:
                 "context": target.context,
                 "output_ref": target.output_ref,
                 "input_refs": dict(sorted(target.input_refs.items())),
+                "build_contexts": dict(sorted(target.build_contexts.items())),
                 "push": target.push,
             }
             for target in plan.targets
@@ -80,6 +81,7 @@ def load_plan_json(text: str) -> BuildPlan:
             output_ref = raw["output_ref"]
             push = raw["push"]
             input_refs = raw["input_refs"]
+            build_contexts = raw.get("build_contexts", input_refs)
             reasons = _string_list(raw["reasons"], f"{field}.reasons")
             dependencies = _string_list(raw["dependencies"], f"{field}.dependencies")
             needs = _string_list(raw["needs"], f"{field}.needs")
@@ -104,6 +106,12 @@ def load_plan_json(text: str) -> BuildPlan:
             raise PlatformImagesError(
                 f"plan field '{field}.input_refs' must be an object of strings"
             )
+        if not isinstance(build_contexts, dict) or not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in build_contexts.items()
+        ):
+            raise PlatformImagesError(
+                f"plan field '{field}.build_contexts' must be an object of strings"
+            )
         targets.append(
             BuildPlanTarget(
                 name,
@@ -115,6 +123,7 @@ def load_plan_json(text: str) -> BuildPlan:
                 output_ref,
                 dict(sorted(input_refs.items())),
                 push,
+                dict(sorted(build_contexts.items())),
             )
         )
     return BuildPlan(1, mode, base_sha, head_sha, tuple(targets), removed_targets)

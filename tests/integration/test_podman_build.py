@@ -53,6 +53,42 @@ def nerdctl_available() -> bool:
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize(
+    ("builder", "available"),
+    (
+        ("docker", docker_available),
+        ("podman", podman_available),
+        ("buildah", buildah_available),
+        ("nerdctl", nerdctl_available),
+    ),
+)
+def test_fully_qualified_local_parent_is_replaced_by_planned_image(
+    tmp_path: Path,
+    builder: str,
+    available,
+) -> None:
+    if not available():
+        pytest.skip(f"a working {builder} setup is unavailable")
+    root = tmp_path / f"qualified-reference-{builder}"
+    base = root / "containers" / "base"
+    application = root / "containers" / "application"
+    base.mkdir(parents=True)
+    application.mkdir(parents=True)
+    (base / "Dockerfile").write_text(
+        "FROM alpine:3.22\nRUN echo exact-local-parent > /parent-marker\n",
+        encoding="utf-8",
+    )
+    (application / "Dockerfile").write_text(
+        "FROM registry.invalid/gitlab/base:latest\n"
+        'RUN test "$(cat /parent-marker)" = exact-local-parent\n',
+        encoding="utf-8",
+    )
+
+    assert main(["init", "--builder", builder], cwd=root) == 0
+    assert main(["images", "build", "application"], cwd=root) == 0
+
+
+@pytest.mark.integration
 @pytest.mark.skipif(not podman_available(), reason="a working Podman service is unavailable")
 def test_curl_consumes_controller_selected_local_base() -> None:
     root = Path(__file__).parents[2]

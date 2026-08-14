@@ -64,11 +64,12 @@ def build_command(
         if push:
             raise ValueError(f"{builder.value} requires a separate registry push")
         command = [capabilities.executable, "build"]
-    for dependency, reference in sorted(target.input_refs.items()):
-        context = (context_overrides or {}).get(dependency)
+    build_contexts = target.build_contexts or target.input_refs
+    for context_name, reference in sorted(build_contexts.items()):
+        context = (context_overrides or {}).get(reference)
         if context is None:
             context = f"{capabilities.context_scheme}{reference}"
-        command.extend(["--build-context", f"{dependency}={context}"])
+        command.extend(["--build-context", f"{context_name}={context}"])
     for name, value in sorted((labels or {}).items()):
         command.extend(["--label", f"{name}={value}"])
     command.extend(["--file", target.dockerfile])
@@ -100,8 +101,8 @@ def execute_local_plan(
         local_contexts: dict[str, str] = {}
         for target in plan.targets:
             overrides = {
-                dependency: local_contexts[reference]
-                for dependency, reference in target.input_refs.items()
+                reference: local_contexts[reference]
+                for reference in (target.build_contexts or target.input_refs).values()
                 if reference in local_contexts
             }
             command = build_command(
@@ -358,6 +359,7 @@ def execute_ci_build(
         output_ref,
         dict(sorted(input_refs.items())),
         True,
+        graph.build_contexts(target_name, input_refs),
     )
     identity_labels = {
         "org.opencontainers.image.revision": revision,

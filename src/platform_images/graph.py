@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from platform_images.config import RepositoryConfig
 from platform_images.dockerfile import DockerfileParseResult, parse_dockerfile
 from platform_images.errors import GraphCycleError
+from platform_images.image_identity import build_image_identity_resolver
 from platform_images.models import ImageReference, ImageTarget, ReferenceKind
 
 
@@ -29,6 +30,24 @@ class ImageGraph:
     def direct_dependents(self, target: str) -> tuple[str, ...]:
         self._require_target(target)
         return tuple(sorted(self.dependents[target]))
+
+    def build_contexts(
+        self,
+        target: str,
+        input_refs: Mapping[str, str],
+    ) -> dict[str, str]:
+        """Map every Dockerfile spelling of a local dependency to its exact planned image."""
+        self._require_target(target)
+        contexts = {dependency: reference for dependency, reference in input_refs.items()}
+        for image_reference in self.parse_results[target].references:
+            if (
+                image_reference.kind is ReferenceKind.LOCAL_TARGET
+                and image_reference.resolved in input_refs
+            ):
+                contexts[image_reference.source or image_reference.raw] = input_refs[
+                    image_reference.resolved
+                ]
+        return dict(sorted(contexts.items()))
 
     def upstream_closure(self, targets: set[str] | frozenset[str]) -> frozenset[str]:
         pending = list(targets)
@@ -115,6 +134,12 @@ class ImageGraph:
 
 def build_graph(targets: Mapping[str, ImageTarget], config: RepositoryConfig) -> ImageGraph:
     names = frozenset(targets)
+    image_identities = build_image_identity_resolver(
+        names,
+        config.registry.namespace,
+        repositories={name: config.image_repository(name) for name in names},
+        aliases={name: config.image_aliases(name) for name in names},
+    )
     parse_results: dict[str, DockerfileParseResult] = {}
     dependencies: dict[str, frozenset[str]] = {}
     external: dict[str, tuple[ImageReference, ...]] = {}
@@ -137,6 +162,7 @@ def build_graph(targets: Mapping[str, ImageTarget], config: RepositoryConfig) ->
             target_names=names,
             internal_namespace=config.registry.namespace,
             allowed_short_external_images=config.dockerfile.allowed_short_external_images,
+            image_identities=image_identities,
         )
         if read_error:
             result = DockerfileParseResult(

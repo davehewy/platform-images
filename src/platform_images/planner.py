@@ -52,6 +52,7 @@ def local_plan(
             reasons = ("selected",)
         else:
             reasons = _dependency_reasons(consumer_masks[name], selected_names)
+        input_refs = {dep: policy.local(dep) for dep in dependencies}
         plan_targets.append(
             BuildPlanTarget(
                 name=name,
@@ -61,8 +62,9 @@ def local_plan(
                 dockerfile=_relative(target.dockerfile, config.root),
                 context=_relative(target.context, config.root),
                 output_ref=policy.local(name),
-                input_refs={dep: policy.local(dep) for dep in dependencies},
+                input_refs=input_refs,
                 push=False,
+                build_contexts=graph.build_contexts(name, input_refs),
             )
         )
     return BuildPlan(1, BuildMode.LOCAL, None, "local", tuple(plan_targets), ())
@@ -127,6 +129,7 @@ def change_plan(
                 output_ref=outputs[name],
                 input_refs=input_refs,
                 push=True,
+                build_contexts=graph.build_contexts(name, input_refs),
             )
         )
     return BuildPlan(
@@ -211,6 +214,10 @@ def validate_plan_against_graph(
         if set(target.input_refs) != set(expected_dependencies):
             raise PlatformImagesError(
                 f'persisted plan input references do not match graph for "{target.name}"'
+            )
+        if target.build_contexts != graph.build_contexts(target.name, target.input_refs):
+            raise PlatformImagesError(
+                f'persisted plan build contexts do not match graph for "{target.name}"'
             )
         if (target.dockerfile, target.context) != (expected_dockerfile, expected_context):
             raise PlatformImagesError(

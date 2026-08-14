@@ -29,9 +29,8 @@ information already exists in instructions such as `FROM base`, but normal CI pa
 understand it. They also do not solve how independently scheduled jobs pass the exact newly built
 parent image to their consumers.
 
-This tool discovers one target per direct directory beneath one or more configurable
-repository-relative roots (`images` by default). Each target can use either `Dockerfile` or
-`Containerfile`. It infers
+This tool discovers one target per direct directory containing a `Dockerfile` or `Containerfile`
+beneath one or more configurable repository-relative roots (`images` by default). It infers
 their **build-time** dependency graph, maps a Git diff onto that graph, and follows changes
 downstream. It can render dynamic GitLab child-pipeline jobs or generate a complete GitHub Actions
 workflow. Docker Buildx, Podman, Buildah, and nerdctl/BuildKit are supported explicitly. Every
@@ -59,6 +58,7 @@ before consumers, while unrelated nodes remain parallelizable.
 - [What this solves and what it does not](#what-this-solves-and-what-it-does-not)
 - [Installation](#installation)
 - [Quick start](#quick-start)
+- [Image names, local references, and published repositories](#image-names-local-references-and-published-repositories)
 - [The checked-in example](#the-checked-in-example)
 - [Demonstration](#demonstration)
 - [Worked examples](#worked-examples)
@@ -115,7 +115,7 @@ Install a specific version or choose another destination with environment variab
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/davehewy/platform-images/main/scripts/install.sh |
-  PLATFORM_IMAGES_VERSION=0.9.1 PLATFORM_IMAGES_INSTALL_DIR=/usr/local/bin sh
+  PLATFORM_IMAGES_VERSION=0.11.0 PLATFORM_IMAGES_INSTALL_DIR=/usr/local/bin sh
 ```
 
 On Windows, run this in PowerShell. It verifies the Windows archive, installs `platform.exe` below
@@ -132,12 +132,12 @@ Each [GitHub release](https://github.com/davehewy/platform-images/releases) prov
 
 | System | Architecture | Release asset |
 | --- | --- | --- |
-| GNU/Linux | AMD64 / x86_64 | `platform-images-v0.9.1-linux-amd64.tar.gz` |
-| GNU/Linux | ARM64 / AArch64 | `platform-images-v0.9.1-linux-arm64.tar.gz` |
-| macOS / Darwin | Intel AMD64 | `platform-images-v0.9.1-darwin-amd64.tar.gz` |
-| macOS / Darwin | Apple Silicon ARM64 | `platform-images-v0.9.1-darwin-arm64.tar.gz` |
-| Windows | AMD64 / x86_64 | `platform-images-v0.9.1-windows-amd64.zip` |
-| Windows | ARM64 | `platform-images-v0.9.1-windows-arm64.zip` |
+| GNU/Linux | AMD64 / x86_64 | `platform-images-v0.11.0-linux-amd64.tar.gz` |
+| GNU/Linux | ARM64 / AArch64 | `platform-images-v0.11.0-linux-arm64.tar.gz` |
+| macOS / Darwin | Intel AMD64 | `platform-images-v0.11.0-darwin-amd64.tar.gz` |
+| macOS / Darwin | Apple Silicon ARM64 | `platform-images-v0.11.0-darwin-arm64.tar.gz` |
+| Windows | AMD64 / x86_64 | `platform-images-v0.11.0-windows-amd64.zip` |
+| Windows | ARM64 | `platform-images-v0.11.0-windows-arm64.zip` |
 
 Every archive name contains its exact release version, so downloads from different releases remain
 self-identifying when stored together. Each archive contains the native `platform` executable,
@@ -158,7 +158,7 @@ If Python 3.12 is already part of the team's toolchain, `uv` can install an isol
 
 ```bash
 uv tool install --python 3.12 \
-  "git+https://github.com/davehewy/platform-images.git@v0.8.0"
+  "git+https://github.com/davehewy/platform-images.git@v0.11.0"
 ```
 
 The universal `platform_images-<version>-py3-none-any.whl` and conventional Python source
@@ -188,7 +188,7 @@ Confirm which release is installed:
 
 ```bash
 platform version
-# platform-images 0.9.1
+# platform-images 0.11.0
 ```
 
 In a repository that already contains image target directories but no configuration, initialize it
@@ -203,9 +203,10 @@ as discovery roots, and writes a Docker-based starter `platform-images.toml`. Di
 live at any depth and can be nested—for example, `utils` and `utils/container-images` can coexist.
 Directories beneath those roots that do not contain either build filename are ordinary repository
 directories and are ignored.
-It also adds inferred short external bases such as `alpine` to the starter allowlist and prints
-them for review; references resembling a local target typo remain validation errors. It never
-moves an image, assumes a fixed root name, or overwrites an existing configuration.
+It also adds inferred short external bases such as `alpine` to the starter allowlist, infers
+published repository paths from qualified references whose final component exactly matches a local
+target, and prints both for review. References resembling a local target typo remain validation
+errors. It never moves an image, assumes a fixed root name, or overwrites an existing configuration.
 
 If auto-discovery is intentionally broader than the ownership areas you want, name each existing
 target parent directory explicitly. The directories can be anywhere beneath the repository:
@@ -245,6 +246,98 @@ select Docker explicitly because it is the most common starting point. Podman re
 backward-compatible default when older configurations omit the build setting; select another
 backend with `--builder`, or use `--engine` when its matching registry transport should be selected
 too.
+
+## Image names, local references, and published repositories
+
+The tool separates three names that are often accidentally conflated:
+
+1. **Logical target name** — the target directory name, such as `ubuntu-base-24-04`. This stable
+   name is used by the graph, commands, plans, manifests, and CI relationships.
+2. **Published repository** — the registry-relative destination, such as
+   `gitlab/ubuntu-base-24-04`. The registry hostname is supplied separately through
+   `PLATFORM_IMAGES_REGISTRY`.
+3. **Tag or digest** — the repository version, such as `latest`, `sha-<commit>`, or
+   `@sha256:...`. It does not define target identity.
+
+Name each target directory for the image's stable role, using lowercase letters and numbers with
+`.`, `_`, or `-` separators. That directory name is the repository-wide logical ID, so it must be
+unique across every discovery root. Keep registry hosts, repository paths, and tags out of the
+directory name; changing the directory name is an identity change, not merely a layout change.
+
+For new or repository-owned Dockerfiles, prefer the short logical name:
+
+```dockerfile
+# utils/container-images/application/Dockerfile
+FROM ubuntu-base-24-04
+```
+
+This is the clearest local contract: the checked-in target named `ubuntu-base-24-04` is a build
+input. The planner binds it to the exact newly built image or unchanged stable digest, so the
+consumer does not pull a mutable tag by accident.
+
+Build these Dockerfiles through `platform images build` or the generated CI. A plain
+`docker build`/`podman build` does not receive the controller's named contexts and may try to pull a
+short logical name from a registry.
+
+By default, a target is published as `<registry>/<registry.namespace>/<logical-name>:<tag>`. When
+an established repository path differs, declare it explicitly:
+
+```toml
+[registry]
+namespace = "platform-images"
+registry_environment_variable = "PLATFORM_IMAGES_REGISTRY"
+stable_tag = "latest"
+
+[images.ubuntu-base-24-04]
+repository = "gitlab/ubuntu-base-24-04"
+```
+
+With `PLATFORM_IMAGES_REGISTRY=nexus.example.com`, that target publishes to repositories such as:
+
+```text
+nexus.example.com/gitlab/ubuntu-base-24-04:sha-<full-commit-sha>
+nexus.example.com/gitlab/ubuntu-base-24-04:latest
+```
+
+An existing consumer may keep its fully qualified source:
+
+```dockerfile
+FROM nexus.example.com/gitlab/ubuntu-base-24-04:latest
+```
+
+The repository mapping joins that source to the local logical target. Tags and digests are removed
+only while comparing identity; the exact expanded Dockerfile source is then replaced with the
+planned commit-addressed image through a named build context. The edge is therefore real in both
+`platform images graph` and the executed build.
+
+During a registry migration, list old repository identities as tagless aliases:
+
+```toml
+[images.ubuntu-base-24-04]
+repository = "gitlab/ubuntu-base-24-04"
+aliases = [
+  "old-nexus.example.com/legacy/ubuntu-base-24-04",
+]
+```
+
+Aliases are accepted as dependency inputs but never become output destinations. Repository and
+alias identities must be globally unique; validation fails rather than guessing if two targets
+claim the same identity. `platform init` infers a non-default repository when an existing qualified
+reference ends with an exact discovered target name, and prints every inference for review.
+`platform images show <target>` displays the effective repository and aliases.
+
+The published repository's final component does not have to equal the logical target. For example,
+this deliberately maps local target directory `foundation` to a differently named remote image:
+
+```toml
+[images.foundation]
+repository = "gitlab/ubuntu-base-24-04"
+```
+
+`FROM nexus.example.com/gitlab/ubuntu-base-24-04:latest` then creates an edge to `foundation`.
+Because that relationship cannot be inferred safely from two different names, configure it
+explicitly; automatic `init` inference only acts when the repository's final component exactly
+matches one discovered logical target.
 
 ## The checked-in example
 
@@ -327,6 +420,8 @@ Validation passed (2 image targets).
 $ platform images show curl
 curl
   build_file: images/curl/Dockerfile
+  repository: platform-images/curl
+  aliases: none
   dependencies: base
   dependents: none
 
@@ -960,8 +1055,9 @@ platform init
 ```
 
 Use this when adopting the tool in an existing repository: it derives discovery roots from the
-locations of existing build files, infers unqualified external base names, uses the repository
-directory for a normalized namespace, and validates the result. Pass repeatable
+locations of existing build files, infers unqualified external base names and qualified published
+repositories that exactly match discovered target names, uses the repository directory for a
+normalized namespace, and validates the result. Pass repeatable
 `--discovery-root` options when you want to declare ownership areas explicitly, `--namespace` when
 the registry hierarchy differs from the repository name, and `--builder` when Docker is not the
 right default. The command refuses to replace `platform-images.toml`; configuration changes after
@@ -1007,7 +1103,7 @@ global_inputs = [
 
 | Setting | What it controls | When and why to change it |
 | --- | --- | --- |
-| `registry.namespace` | The repository prefix between the registry host and target name. Local images use the same namespace beneath `localhost/`. | Change it to match the team's ECR repository hierarchy, such as `platform/base-images`. It also identifies registry-qualified references intended to be internal, allowing missing internal targets to fail validation. |
+| `registry.namespace` | Default repository prefix between the registry host and logical target name. Local images use the same path beneath `localhost/`; an `images.<target>.repository` entry overrides it for that target. | Change it to match the team's usual repository hierarchy, such as `platform/base-images`. Qualified references beneath managed repository paths are treated as internal, allowing missing targets to fail validation. |
 | `registry.registry_environment_variable` | The environment-variable name from which the registry hostname is read. | Keep the default when one standard variable is acceptable. Change it to align with an established CI variable such as `COMPANY_ECR_REGISTRY` without hard-coding an account or region in the repository. |
 | `registry.stable_tag` | The mutable alias resolved for unchanged parents and updated after a successful default-branch graph. | `main` is a clear default. Change it to `stable`, `production`, or another existing convention. This is a build baseline, not an environment deployment mechanism. |
 | `registry.transport` | The CLI used for login, retry inspection, push, and promotion. Accepted values are `docker`, `podman`, `buildah`, and `nerdctl`. | Usually match the builder. Podman and Buildah may be mixed because they share containers-storage; Docker and nerdctl require their matching transport. |
@@ -1019,6 +1115,23 @@ export PLATFORM_IMAGES_REGISTRY=123456789012.dkr.ecr.eu-west-2.amazonaws.com
 ```
 
 The account and region are parsed from that hostname and passed explicitly to AWS CLI operations.
+
+### Image identity settings
+
+The `[images.<logical-target>]` tables are optional. Without one, the published repository is
+`<registry.namespace>/<logical-target>` and the short logical name is the recommended local
+Dockerfile reference.
+
+| Setting | What it controls | When and why to change it |
+| --- | --- | --- |
+| `images.<target>.repository` | Registry-relative output repository and canonical qualified dependency identity. It must not contain a registry hostname, tag, or digest. | Set it when the pushed name does not follow `<registry.namespace>/<target>`, for example `gitlab/ubuntu-base-24-04`. |
+| `images.<target>.aliases` | Additional tagless full or registry-relative repositories that resolve to this logical target. Aliases are inputs only. | Use during registry or repository renames so older checked-in `FROM`, `COPY --from`, or `RUN --mount=from` references still form the correct local edge while outputs use `repository`. |
+
+The registry host remains an environment or CI concern. For example, configure
+`repository = "gitlab/ubuntu-base-24-04"` and set
+`PLATFORM_IMAGES_REGISTRY=nexus.example.com`; do not put `nexus.example.com` or `:latest` in the
+`repository` setting. Validation rejects stale target entries, tagged aliases, and identities
+claimed by more than one target.
 
 ### Tag settings
 
@@ -1145,10 +1258,11 @@ over stdin. Use the organisation's short-lived workload identity for AWS authent
 1. Configure `discovery.roots` around the repository's existing ownership areas and put each owned
    target in a direct child directory of one of them. Keep exactly one `Dockerfile` or
    `Containerfile` per target and keep ordinary context files alongside it.
-2. Replace internal registry references between these images with logical names such as
-   `FROM base`.
-3. Configure the registry namespace, stable tag, approved short external images, and genuine shared
-   inputs in `platform-images.toml`.
+2. Prefer logical references such as `FROM base`. Where established Dockerfiles must keep qualified
+   references, configure each target's canonical `images.<target>.repository` and any legacy
+   aliases.
+3. Configure the registry namespace, stable tag, approved short external images, per-target
+   repository overrides, and genuine shared inputs in `platform-images.toml`.
 4. Choose `build.backend` and `registry.transport`, then run `platform images validate`, `graph`,
    and `build <leaf> --dry-run` locally. Review the inferred graph with image owners.
 5. Create the ECR repositories and runner permissions described in [ECR setup](docs/ecr-setup.md).
@@ -1172,7 +1286,7 @@ over stdin. Use the organisation's short-lived workload identity for AWS authent
 | `platform version [--format json]` | Print the installed release without requiring a configured repository. `platform --version` is the shorter equivalent. |
 | `platform init [--discovery-root <path> ...] [--namespace <name>] [--builder <name>]` | Safely create `platform-images.toml` by inferring existing target groups or using explicit roots. Refuses to overwrite existing configuration. |
 | `platform images list` | Inventory discovered image targets. |
-| `platform images show <name>` | Inspect one target's direct dependencies and dependents. |
+| `platform images show <name>` | Inspect one target's build file, effective published repository, aliases, dependencies, and dependents. |
 | `platform images validate` | Gate commits before planning or building. |
 | `platform images graph [--format json] [--ascii]` | Review or export the complete dependency graph. Text output is always a visibly connected tree; `--ascii` replaces Unicode line drawing for limited terminals. |
 | `platform images build <name> [--dry-run] [--no-deps] [--builder <name>]` | Build locally with deterministic dependency binding using the configured or selected backend. |

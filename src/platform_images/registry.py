@@ -77,7 +77,7 @@ class ECRRegistryClient(RegistryClient):
                 "automatic stable-image resolution requires an AWS ECR registry hostname; "
                 "set PLATFORM_IMAGES_STABLE_REFS for another registry"
             )
-        repository = f"{self.config.registry.namespace}/{target}"
+        repository = self.config.image_repository(target)
         try:
             result = self.runner.run(
                 [

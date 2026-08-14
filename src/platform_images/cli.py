@@ -440,6 +440,10 @@ def _run_init(arguments: argparse.Namespace, cwd: Path | None) -> int:
     )
     for discovery_root in result.discovery_roots:
         print(f"  - {discovery_root}")
+    if result.image_repositories:
+        print("Published image repositories inferred from build-file references:")
+        for target, repository in result.image_repositories:
+            print(f"  - {target}: {repository}")
     if result.allowed_short_external_images:
         print("Allowed short external images inferred from build files:")
         for image in result.allowed_short_external_images:
@@ -747,18 +751,20 @@ def _run(arguments: argparse.Namespace, cwd: Path | None, environment: Mapping[s
     if arguments.command == "show":
         if arguments.name not in graph.targets:
             raise PlatformImagesError(f"unknown image target: {arguments.name}")
-        data = graph_data(graph, root)["targets"][arguments.name]  # type: ignore[index]
+        data = graph_data(graph, root, config)["targets"][arguments.name]  # type: ignore[index]
         if arguments.format == "json":
             print(json.dumps({"schema_version": 1, "name": arguments.name, **data}, indent=2))
         else:
             print(arguments.name)
             print(f"  build_file: {data['dockerfile']}")
+            print(f"  repository: {data['repository']}")
+            print(f"  aliases: {', '.join(data['aliases']) or 'none'}")
             print(f"  dependencies: {', '.join(data['dependencies']) or 'none'}")
             print(f"  dependents: {', '.join(data['dependents']) or 'none'}")
         return 0
     if arguments.command == "graph":
         print(
-            render_graph_json(graph, root)
+            render_graph_json(graph, root, config)
             if arguments.format == "json"
             else render_graph_text(graph, ascii_only=arguments.ascii or sys.platform == "win32")
         )
