@@ -115,7 +115,7 @@ Install a specific version or choose another destination with environment variab
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/davehewy/platform-images/main/scripts/install.sh |
-  PLATFORM_IMAGES_VERSION=0.8.0 PLATFORM_IMAGES_INSTALL_DIR=/usr/local/bin sh
+  PLATFORM_IMAGES_VERSION=0.9.0 PLATFORM_IMAGES_INSTALL_DIR=/usr/local/bin sh
 ```
 
 On Windows, run this in PowerShell. It verifies the Windows archive, installs `platform.exe` below
@@ -132,12 +132,12 @@ Each [GitHub release](https://github.com/davehewy/platform-images/releases) prov
 
 | System | Architecture | Release asset |
 | --- | --- | --- |
-| GNU/Linux | AMD64 / x86_64 | `platform-images-v0.8.0-linux-amd64.tar.gz` |
-| GNU/Linux | ARM64 / AArch64 | `platform-images-v0.8.0-linux-arm64.tar.gz` |
-| macOS / Darwin | Intel AMD64 | `platform-images-v0.8.0-darwin-amd64.tar.gz` |
-| macOS / Darwin | Apple Silicon ARM64 | `platform-images-v0.8.0-darwin-arm64.tar.gz` |
-| Windows | AMD64 / x86_64 | `platform-images-v0.8.0-windows-amd64.zip` |
-| Windows | ARM64 | `platform-images-v0.8.0-windows-arm64.zip` |
+| GNU/Linux | AMD64 / x86_64 | `platform-images-v0.9.0-linux-amd64.tar.gz` |
+| GNU/Linux | ARM64 / AArch64 | `platform-images-v0.9.0-linux-arm64.tar.gz` |
+| macOS / Darwin | Intel AMD64 | `platform-images-v0.9.0-darwin-amd64.tar.gz` |
+| macOS / Darwin | Apple Silicon ARM64 | `platform-images-v0.9.0-darwin-arm64.tar.gz` |
+| Windows | AMD64 / x86_64 | `platform-images-v0.9.0-windows-amd64.zip` |
+| Windows | ARM64 | `platform-images-v0.9.0-windows-arm64.zip` |
 
 Every archive name contains its exact release version, so downloads from different releases remain
 self-identifying when stored together. Each archive contains the native `platform` executable,
@@ -184,7 +184,41 @@ pip install -e ".[dev]"
 
 ## Quick start
 
-From the repository root:
+Confirm which release is installed:
+
+```bash
+platform version
+# platform-images 0.9.0
+```
+
+In a repository that already contains image target directories but no configuration, initialize it
+from the existing layout:
+
+```bash
+platform init
+```
+
+`init` scans for existing `Dockerfile` and `Containerfile` targets, infers every non-overlapping
+parent directory as a discovery root, and writes a Docker-based starter `platform-images.toml`. It
+also adds inferred short external bases such as `alpine` to the starter allowlist and prints them
+for review; references resembling a local target typo remain validation errors. It never moves an
+image, assumes a fixed root name, or overwrites an existing configuration.
+
+If auto-discovery is intentionally broader than the ownership areas you want, name each existing
+target parent directory explicitly. The directories can be anywhere beneath the repository:
+
+```bash
+platform init \
+  --discovery-root containers/shared \
+  --discovery-root services/payments/container-images \
+  --namespace platform/my-repository
+```
+
+Use `--builder podman`, `buildah`, or `nerdctl` when Docker is not the team's default. `init` chooses
+the matching registry transport unless `--registry-transport` is set explicitly. Run
+`platform init --help` to see all initialization choices.
+
+Then, from the repository root:
 
 ```bash
 platform images list
@@ -203,9 +237,11 @@ uv run platform images graph
 uv run platform images build curl --dry-run
 ```
 
-Remove `--dry-run` when the configured backend is available. Podman remains the
-backward-compatible default; select another backend with `--builder`, or use `--engine` when its
-matching registry transport should be selected too.
+Remove `--dry-run` when the configured backend is available. New `platform init` configurations
+select Docker explicitly because it is the most common starting point. Podman remains the
+backward-compatible default when older configurations omit the build setting; select another
+backend with `--builder`, or use `--engine` when its matching registry transport should be selected
+too.
 
 ## The checked-in example
 
@@ -895,7 +931,23 @@ useful names; the manifest is the exact set.
 
 ## Configuration capabilities
 
-Configuration lives in `platform-images.toml`. This repository's complete configuration is:
+Configuration lives in `platform-images.toml`. The fastest safe way to create it is:
+
+```bash
+platform init
+```
+
+Use this when adopting the tool in an existing repository: it derives discovery roots from the
+locations of existing build files, infers unqualified external base names, uses the repository
+directory for a normalized namespace, and validates the result. Pass repeatable
+`--discovery-root` options when you want to declare ownership areas explicitly, `--namespace` when
+the registry hierarchy differs from the repository name, and `--builder` when Docker is not the
+right default. The command refuses to replace `platform-images.toml`; configuration changes after
+initialization remain ordinary reviewed source changes. Review the short external image allowlist
+printed by `init` before committing it; likely misspellings of local targets are deliberately not
+added automatically.
+
+This repository's complete configuration is:
 
 ```toml
 [registry]
@@ -1095,6 +1147,8 @@ over stdin. Use the organisation's short-lived workload identity for AWS authent
 
 | Command | Typical use |
 | --- | --- |
+| `platform version [--format json]` | Print the installed release without requiring a configured repository. `platform --version` is the shorter equivalent. |
+| `platform init [--discovery-root <path> ...] [--namespace <name>] [--builder <name>]` | Safely create `platform-images.toml` by inferring existing target groups or using explicit roots. Refuses to overwrite existing configuration. |
 | `platform images list` | Inventory discovered image targets. |
 | `platform images show <name>` | Inspect one target's direct dependencies and dependents. |
 | `platform images validate` | Gate commits before planning or building. |

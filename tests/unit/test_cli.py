@@ -7,8 +7,212 @@ from pathlib import Path
 import pytest
 from conftest import git
 
+from platform_images import __version__
 from platform_images.cli import _ci_base_head, main
-from platform_images.models import BuildMode
+from platform_images.config import RepositoryConfig
+from platform_images.models import BuildBackend, BuildMode, RegistryTransport
+from platform_images.validation import validate_repository
+
+
+def test_root_and_images_help_list_described_commands_one_per_line(capsys) -> None:
+    with pytest.raises(SystemExit) as root_help:
+        main(["--help"])
+    assert root_help.value.code == 0
+    root_output = capsys.readouterr().out
+    assert "COMMAND" in root_output
+    assert "    init      create a safe starter configuration" in root_output
+    assert "    images    inspect, plan, build, and publish" in root_output
+    assert "    version   print the installed platform-images version" in root_output
+
+    with pytest.raises(SystemExit) as images_help:
+        main(["images", "--help"])
+    assert images_help.value.code == 0
+    image_output = capsys.readouterr().out
+    assert "{list,show" not in image_output
+    for command, description in (
+        ("list", "list every discovered image target"),
+        ("graph", "print the complete container-image dependency DAG"),
+        ("affected", "list changed targets and all of their downstream consumers"),
+        ("generate-workflow", "generate a complete dependency-aware CI workflow"),
+    ):
+        assert any(
+            line.strip().startswith(f"{command} ") and description in line
+            for line in image_output.splitlines()
+        )
+
+
+def test_version_command_and_flag_do_not_require_a_repository(tmp_path: Path, capsys) -> None:
+    assert main(["version"], cwd=tmp_path, environment={}) == 0
+    assert capsys.readouterr().out == f"platform-images {__version__}\n"
+
+    assert main(["version", "--format", "json"], cwd=tmp_path, environment={}) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "name": "platform-images",
+        "version": __version__,
+    }
+
+    with pytest.raises(SystemExit) as version_flag:
+        main(["--version"], cwd=tmp_path, environment={})
+    assert version_flag.value.code == 0
+    assert capsys.readouterr().out == f"platform-images {__version__}\n"
+
+
+def test_init_infers_multiple_roots_and_external_images(tmp_path: Path, capsys) -> None:
+    root = tmp_path / "My Platform Repository"
+    base = root / "containers" / "shared" / "base"
+    api = root / "services" / "payments" / "container-images" / "api"
+    base.mkdir(parents=True)
+    api.mkdir(parents=True)
+    (base / "Containerfile").write_text("FROM alpine:3.22\n", encoding="utf-8")
+    (api / "Dockerfile").write_text("FROM base\n", encoding="utf-8")
+
+    assert main(["init"], cwd=root, environment={}) == 0
+
+    config = RepositoryConfig.load(root)
+    assert config.registry.namespace == "my-platform-repository"
+    assert config.discovery.roots == (
+        "containers/shared",
+        "services/payments/container-images",
+    )
+    assert config.build.backend is BuildBackend.DOCKER
+    assert config.registry.transport is RegistryTransport.DOCKER
+    assert config.dockerfile.allowed_short_external_images == frozenset({"alpine", "scratch"})
+    assert validate_repository(config).valid
+    output = capsys.readouterr().out
+    assert "Created platform-images.toml" in output
+    assert "Discovered 2 image targets across 2 roots:" in output
+    assert "Allowed short external images inferred from build files:" in output
+    assert "Initial validation passed (2 image targets)." in output
+    assert "Next: platform images graph" in output
+
+
+def test_init_accepts_explicit_empty_root_and_selected_backend(tmp_path: Path, capsys) -> None:
+    root = tmp_path / "repository"
+    (root / "owned" / "container-images").mkdir(parents=True)
+
+    assert (
+        main(
+            [
+                "init",
+                "--discovery-root",
+                "owned/container-images",
+                "--namespace",
+                "team/repository",
+                "--builder",
+                "buildah",
+                "--registry-transport",
+                "podman",
+            ],
+            cwd=root,
+            environment={},
+        )
+        == 0
+    )
+
+    config = RepositoryConfig.load(root)
+    assert config.discovery.roots == ("owned/container-images",)
+    assert config.registry.namespace == "team/repository"
+    assert config.build.backend is BuildBackend.BUILDAH
+    assert config.registry.transport is RegistryTransport.PODMAN
+    assert validate_repository(config).valid
+    assert "Discovered 0 image targets across 1 root:" in capsys.readouterr().out
+
+
+def test_init_does_not_allowlist_a_probable_local_target_typo(tmp_path: Path, capsys) -> None:
+    root = tmp_path / "repository"
+    base = root / "containers" / "base"
+    api = root / "containers" / "api"
+    base.mkdir(parents=True)
+    api.mkdir(parents=True)
+    (base / "Dockerfile").write_text("FROM alpine\n", encoding="utf-8")
+    (api / "Dockerfile").write_text("FROM bsae\n", encoding="utf-8")
+
+    assert main(["init"], cwd=root, environment={}) == 0
+
+    config = RepositoryConfig.load(root)
+    assert "bsae" not in config.dockerfile.allowed_short_external_images
+    report = validate_repository(config)
+    assert [issue.code for issue in report.errors] == ["unknown-short-reference"]
+    output = capsys.readouterr().out
+    assert "Initial validation found 1 error." in output
+    assert "Next: platform images validate" in output
+
+
+def test_init_refuses_to_overwrite_configuration(tmp_path: Path, capsys) -> None:
+    root = tmp_path / "repository"
+    root.mkdir()
+    configuration = root / "platform-images.toml"
+    configuration.write_text("keep = 'this exact content'\n", encoding="utf-8")
+
+    assert main(["init"], cwd=root, environment={}) == 1
+
+    assert configuration.read_text(encoding="utf-8") == "keep = 'this exact content'\n"
+    assert "refusing to overwrite" in capsys.readouterr().err
+
+
+def test_init_without_an_inferable_layout_explains_explicit_roots(tmp_path: Path, capsys) -> None:
+    root = tmp_path / "repository"
+    root.mkdir()
+
+    assert main(["init"], cwd=root, environment={}) == 1
+
+    assert not (root / "platform-images.toml").exists()
+    assert "pass --discovery-root PATH" in capsys.readouterr().err
+
+
+def test_init_rejects_overlapping_inferred_roots_without_writing_config(
+    tmp_path: Path, capsys
+) -> None:
+    root = tmp_path / "repository"
+    first = root / "containers" / "base"
+    nested = root / "containers" / "service" / "images" / "api"
+    first.mkdir(parents=True)
+    nested.mkdir(parents=True)
+    (first / "Dockerfile").write_text("FROM alpine\n", encoding="utf-8")
+    (nested / "Dockerfile").write_text("FROM alpine\n", encoding="utf-8")
+
+    assert main(["init"], cwd=root, environment={}) == 1
+
+    assert not (root / "platform-images.toml").exists()
+    error = capsys.readouterr().err
+    assert "discovery roots must not overlap" in error
+    assert "containers and containers/service/images" in error
+
+
+def test_init_rejects_repository_root_build_file(tmp_path: Path, capsys) -> None:
+    root = tmp_path / "repository"
+    root.mkdir()
+    (root / "Dockerfile").write_text("FROM alpine\n", encoding="utf-8")
+
+    assert main(["init"], cwd=root, environment={}) == 1
+
+    assert not (root / "platform-images.toml").exists()
+    assert "repository-root Dockerfile" in capsys.readouterr().err
+
+
+def test_init_rejects_incompatible_builder_and_transport(tmp_path: Path, capsys) -> None:
+    root = tmp_path / "repository"
+    target = root / "containers" / "api"
+    target.mkdir(parents=True)
+    (target / "Dockerfile").write_text("FROM alpine\n", encoding="utf-8")
+
+    assert (
+        main(
+            [
+                "init",
+                "--builder",
+                "docker",
+                "--registry-transport",
+                "podman",
+            ],
+            cwd=root,
+            environment={},
+        )
+        == 1
+    )
+
+    assert not (root / "platform-images.toml").exists()
+    assert "cannot use registry transport" in capsys.readouterr().err
 
 
 def test_list_validate_graph_and_dry_run(

@@ -117,6 +117,19 @@ def build(version: str, expected_system: str, expected_architecture: str, output
     if not binary.is_file():
         raise RuntimeError(f"PyInstaller did not create the expected executable: {binary}")
 
+    version = subprocess.run(
+        [binary, "version"],
+        cwd=root,
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout.strip()
+    expected_version = f"platform-images {__version__}"
+    if version != expected_version:
+        raise RuntimeError(
+            f"standalone executable reported version {version!r}; expected {expected_version!r}"
+        )
+
     environment = dict(os.environ)
     environment["PLATFORM_IMAGES_ROOT"] = str(root)
     subprocess.run([binary, "images", "validate"], cwd=root, env=environment, check=True)
