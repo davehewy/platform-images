@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.11.0 (2026-08-14)
+
+### Bug Fixes
+
+- **ci**: Isolate container integration probes
+  ([`6af854f`](https://github.com/davehewy/platform-images/commit/6af854fc6418acb2c75921cdc260c0bc04243789))
+
+### Features
+
+- **identity**: Resolve published image repositories
+  ([`95ee456`](https://github.com/davehewy/platform-images/commit/95ee456ad75c6a4c6e164dd832888dca859fcff8))
+
+
 ## v0.10.0 (2026-08-14)
 
 ### Features
