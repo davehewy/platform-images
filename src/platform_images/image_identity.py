@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 
 
@@ -27,6 +27,12 @@ class ImageIdentityResolver:
     managed_prefixes: frozenset[str]
     target_names: frozenset[str]
     external_repositories: frozenset[str]
+    _probable_matches_cache: dict[str, tuple[str, ...]] = field(
+        default_factory=dict,
+        init=False,
+        compare=False,
+        repr=False,
+    )
 
     def candidates(self, reference: str) -> frozenset[str]:
         repository = repository_name(reference)
@@ -51,6 +57,9 @@ class ImageIdentityResolver:
         repository = repository_name(reference)
         if "/" not in repository or self.is_explicit_external(repository):
             return ()
+        cached = self._probable_matches_cache.get(repository)
+        if cached is not None:
+            return cached
         basename = repository.rsplit("/", 1)[-1]
         compact_basename = "".join(character for character in basename if character.isalnum())
         scored: list[tuple[float, str]] = []
@@ -62,7 +71,12 @@ class ImageIdentityResolver:
             if score >= 0.75:
                 scored.append((score, target))
         ordered = sorted(scored, key=lambda item: (-item[0], item[1]))
-        return tuple(target for _score, target in ordered)
+        result = tuple(target for _score, target in ordered)
+        # Validation commonly sees the same public base image in hundreds of Dockerfiles. The
+        # resolver is scoped to one immutable target set, so memoizing by normalized repository
+        # avoids repeating an O(targets) fuzzy scan without changing any matching semantics.
+        self._probable_matches_cache[repository] = result
+        return result
 
     def is_managed(self, reference: str) -> bool:
         repository = repository_name(reference)

@@ -100,11 +100,15 @@ def test_github_actions_are_immutable_and_ci_gates_release() -> None:
     benchmark_step = next(
         step
         for step in quality["steps"]  # type: ignore[index]
-        if step.get("name") == "Guard 100-image graph planning performance"
+        if step.get("name") == "Battle-test 360-image imperfect graph and CI generation"
     )
     assert "scripts/benchmark-graph.py" in benchmark_step["run"]
-    assert "--images 100" in benchmark_step["run"]
-    assert "--max-leaf-plan-ms 50" in benchmark_step["run"]
+    assert "--scenario imperfect" in benchmark_step["run"]
+    assert "--images 360" in benchmark_step["run"]
+    assert "--max-validate-ms 750" in benchmark_step["run"]
+    assert "--max-leaf-plan-ms 75" in benchmark_step["run"]
+    assert "--max-graph-render-ms 75" in benchmark_step["run"]
+    assert "--max-ci-render-ms 750" in benchmark_step["run"]
 
 
 def test_release_workflow_builds_all_supported_standalone_platforms() -> None:

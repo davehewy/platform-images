@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from difflib import SequenceMatcher as RealSequenceMatcher
+
+import platform_images.image_identity as image_identity
 from platform_images.image_identity import (
     build_image_identity_resolver,
     registry_relative_repository,
@@ -72,6 +75,32 @@ def test_resolver_reports_only_strong_probable_local_matches() -> None:
         "nexus.example.com/gitlab-runner/ubuntu24-base:latest"
     ) == ("ubuntu24-04-base",)
     assert not resolver.probable_local_targets("docker.io/library/ubuntu:24.04")
+
+
+def test_resolver_memoizes_repeated_probable_match_scans(monkeypatch) -> None:
+    comparisons = 0
+
+    def counting_sequence_matcher(*args, **kwargs):
+        nonlocal comparisons
+        comparisons += 1
+        return RealSequenceMatcher(*args, **kwargs)
+
+    monkeypatch.setattr(image_identity, "SequenceMatcher", counting_sequence_matcher)
+    resolver = build_image_identity_resolver(
+        {f"service-{index:03d}" for index in range(360)},
+        "platform-images",
+    )
+
+    expected = resolver.probable_local_targets("nexus.example.com/retired/service042:latest")
+    first_scan_comparisons = comparisons
+
+    assert expected[0] == "service-042"
+    assert first_scan_comparisons == 360
+    assert (
+        resolver.probable_local_targets("nexus.example.com/retired/service042@sha256:deadbeef")
+        == expected
+    )
+    assert comparisons == first_scan_comparisons
 
 
 def test_resolver_exposes_identity_collisions_without_guessing() -> None:
