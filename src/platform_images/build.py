@@ -17,6 +17,7 @@ from platform_images.backends import (
     push_command,
     validate_execution_pair,
 )
+from platform_images.dockerfile import rewrite_argument_image_references
 from platform_images.errors import PlatformImagesError, ProcessError
 from platform_images.graph import ImageGraph
 from platform_images.models import BuildBackend, BuildPlan, BuildPlanTarget, RegistryTransport
@@ -45,6 +46,7 @@ def build_command(
     metadata_file: Path | None = None,
     context_overrides: Mapping[str, str] | None = None,
     build_arguments: Mapping[str, str] | None = None,
+    dockerfile_override: str | Path | None = None,
 ) -> list[str]:
     if builder is not None and engine is not None and builder is not engine:
         raise ValueError("builder and legacy engine select different backends")
@@ -68,6 +70,8 @@ def build_command(
         command = [capabilities.executable, "build"]
     build_contexts = target.build_contexts or target.input_refs
     for context_name, reference in sorted(build_contexts.items()):
+        if "$" in context_name:
+            continue
         context = (context_overrides or {}).get(reference)
         if context is None:
             context = f"{capabilities.context_scheme}{reference}"
@@ -76,11 +80,47 @@ def build_command(
         command.extend(["--label", f"{name}={value}"])
     for name, value in sorted((build_arguments or {}).items()):
         command.extend(["--build-arg", f"{name}={value}"])
-    command.extend(["--file", target.dockerfile])
+    command.extend(["--file", str(dockerfile_override or target.dockerfile)])
     if not (builder is BuildBackend.NERDCTL and push):
         command.extend(["--tag", target.output_ref])
     command.append(target.context)
     return command
+
+
+def _materialize_bound_dockerfile(
+    target: BuildPlanTarget,
+    *,
+    root: Path,
+    directory: Path,
+) -> Path | None:
+    raw_contexts = {
+        raw: reference for raw, reference in target.build_contexts.items() if "$" in raw
+    }
+    if not raw_contexts:
+        return None
+    reference_targets = {reference: name for name, reference in target.input_refs.items()}
+    replacements: dict[str, str] = {}
+    for raw, reference in raw_contexts.items():
+        dependency = reference_targets.get(reference)
+        if dependency is None:
+            raise PlatformImagesError(
+                f'cannot bind variable image reference {raw!r} for "{target.name}"'
+            )
+        replacements[raw] = dependency
+    source = root / target.dockerfile
+    rewritten, replaced = rewrite_argument_image_references(
+        source.read_text(encoding="utf-8"),
+        replacements,
+    )
+    if replaced != frozenset(replacements):
+        missing = sorted(set(replacements) - replaced)
+        raise PlatformImagesError(
+            f'cannot safely rewrite variable image references for "{target.name}": '
+            + ", ".join(missing)
+        )
+    destination = directory / f"{target.name}.Dockerfile"
+    destination.write_text(rewritten, encoding="utf-8", newline="\n")
+    return destination
 
 
 def execute_local_plan(
@@ -105,6 +145,11 @@ def execute_local_plan(
         context_directory = Path(directory)
         local_contexts: dict[str, str] = {}
         for target in plan.targets:
+            dockerfile_override = _materialize_bound_dockerfile(
+                target,
+                root=root,
+                directory=context_directory,
+            )
             overrides = {
                 reference: local_contexts[reference]
                 for reference in (target.build_contexts or target.input_refs).values()
@@ -115,8 +160,14 @@ def execute_local_plan(
                 builder=builder,
                 context_overrides=overrides,
                 build_arguments=build_arguments,
+                dockerfile_override=dockerfile_override,
             )
-            rendered.append(shlex.join(command))
+            displayed = list(command)
+            if dry_run and dockerfile_override is not None:
+                displayed[displayed.index("--file") + 1] = (
+                    f"<argument-bound-Dockerfile-for-{target.name}>"
+                )
+            rendered.append(shlex.join(displayed))
             if not dry_run:
                 process.run(command, cwd=root)
             if builder is not BuildBackend.NERDCTL or target.output_ref not in required_as_input:
@@ -395,6 +446,11 @@ def execute_ci_build(
     }
     with tempfile.TemporaryDirectory(prefix="platform-images-digest-") as directory:
         digest_file = Path(directory) / "digest"
+        dockerfile_override = _materialize_bound_dockerfile(
+            plan_target,
+            root=root,
+            directory=Path(directory),
+        )
         strategy = BUILDERS[builder].push_strategy
         if strategy is PushStrategy.BUILDX_METADATA:
             metadata_file = Path(directory) / "metadata.json"
@@ -406,6 +462,7 @@ def execute_ci_build(
                     push=True,
                     metadata_file=metadata_file,
                     build_arguments=build_arguments,
+                    dockerfile_override=dockerfile_override,
                 ),
                 cwd=root,
             )
@@ -424,6 +481,7 @@ def execute_ci_build(
                     builder=builder,
                     push=True,
                     build_arguments=build_arguments,
+                    dockerfile_override=dockerfile_override,
                 ),
                 cwd=root,
             )
@@ -449,6 +507,7 @@ def execute_ci_build(
                     labels=labels,
                     builder=builder,
                     build_arguments=build_arguments,
+                    dockerfile_override=dockerfile_override,
                 ),
                 cwd=root,
             )

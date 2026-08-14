@@ -16,6 +16,8 @@
    If a qualified source is assembled from a global `ARG` without a default, configure its
    deterministic value under `[dockerfile.arguments]`. The controller uses it for graph parsing and
    passes the same value to the backend as `--build-arg`, so discovery and execution cannot drift.
+   For local image operands, a temporary execution-only Dockerfile binds the expanded source to the
+   logical named context; prefix expressions work uniformly without editing the checked-in file.
    Run builds through `platform images build` or generated CI so those named contexts are present;
    a plain container build command may try to pull the logical name.
    If a new external base uses an unqualified name such as `debian`, add that repository name to

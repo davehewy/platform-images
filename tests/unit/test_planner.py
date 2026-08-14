@@ -60,6 +60,33 @@ def test_qualified_local_reference_is_bound_to_exact_planned_build_context(
     }
 
 
+def test_argument_qualified_local_reference_retains_raw_and_expanded_bindings(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory(
+        {
+            "base": "FROM alpine\n",
+            "application": "ARG REGISTRY\nFROM ${REGISTRY}/base:latest\n",
+        }
+    )
+    config_path = root / "platform-images.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        + '\n[dockerfile.arguments]\nREGISTRY = "nexus.example.com/team"\n',
+        encoding="utf-8",
+    )
+    config, graph = state(root)
+
+    application = local_plan(graph, config, frozenset({"application"})).targets[-1]
+    planned_base = "localhost/platform-images/base:dev"
+
+    assert application.build_contexts == {
+        "${REGISTRY}/base:latest": planned_base,
+        "base": planned_base,
+        "nexus.example.com/team/base:latest": planned_base,
+    }
+
+
 def test_no_deps_keeps_input_binding_but_not_need(
     repository_factory: Callable[[dict[str, str]], Path],
 ) -> None:

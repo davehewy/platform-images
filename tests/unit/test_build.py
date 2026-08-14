@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from platform_images.build import (
+    _materialize_bound_dockerfile,
     _oci_layout_reference,
     build_command,
     execute_ci_build,
@@ -197,6 +198,48 @@ def test_build_command_passes_configured_dockerfile_arguments() -> None:
         "--build-arg",
         "VERSION=24.04",
     ]
+
+
+def test_materialized_dockerfile_binds_argument_reference_to_logical_context(
+    tmp_path: Path,
+) -> None:
+    context = tmp_path / "images" / "application"
+    context.mkdir(parents=True)
+    (context / "Dockerfile").write_text(
+        "ARG REGISTRY\nFROM ${REGISTRY}/base:latest\nRUN echo $REGISTRY\n",
+        encoding="utf-8",
+    )
+    planned_base = "localhost/platform-images/base:dev"
+    target = BuildPlanTarget(
+        "application",
+        ("selected",),
+        ("base",),
+        ("base",),
+        "images/application/Dockerfile",
+        "images/application",
+        "localhost/platform-images/application:dev",
+        {"base": planned_base},
+        False,
+        {
+            "${REGISTRY}/base:latest": planned_base,
+            "base": planned_base,
+            "nexus.example/team/base:latest": planned_base,
+        },
+    )
+
+    generated = _materialize_bound_dockerfile(target, root=tmp_path, directory=tmp_path)
+
+    assert generated is not None
+    assert generated.read_text(encoding="utf-8") == (
+        "ARG REGISTRY\nFROM base\nRUN echo $REGISTRY\n"
+    )
+    command = build_command(
+        target,
+        builder=BuildBackend.PODMAN,
+        dockerfile_override=generated,
+    )
+    assert str(generated) in command
+    assert not any("${REGISTRY}" in argument for argument in command)
 
 
 def test_build_command_replaces_fully_qualified_dockerfile_image_source() -> None:

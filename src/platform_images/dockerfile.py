@@ -84,6 +84,83 @@ def _resolve_variables(raw: str, arguments: dict[str, str]) -> str | None:
     return None if unresolved or "$" in resolved else resolved
 
 
+def rewrite_argument_image_references(
+    text: str,
+    replacements: Mapping[str, str],
+) -> tuple[str, frozenset[str]]:
+    """Rewrite only ARG-bearing image operands, preserving heredoc bodies and other ARG uses."""
+    if not replacements:
+        return text, frozenset()
+    lines = text.splitlines(keepends=True)
+    output: list[str] = []
+    parts: list[str] = []
+    block_lines: list[str] = []
+    heredocs: list[tuple[str, bool]] = []
+    replaced: set[str] = set()
+    for line in lines:
+        plain = line.rstrip("\r\n")
+        if heredocs:
+            output.append(line)
+            marker, strip_tabs = heredocs[0]
+            if (plain.lstrip("\t") if strip_tabs else plain) == marker:
+                heredocs.pop(0)
+            continue
+        stripped = plain.strip()
+        if not parts and (not stripped or stripped.startswith("#")):
+            output.append(line)
+            continue
+        continued = plain.rstrip().endswith("\\")
+        parts.append(plain.rstrip()[:-1] if continued else plain)
+        block_lines.append(line)
+        if continued:
+            continue
+        logical = " ".join(part.strip() for part in parts).strip()
+        transformed = logical
+        instruction = logical.split(None, 1)[0].upper()
+        for raw, target in replacements.items():
+            escaped = re.escape(raw)
+            if instruction == "FROM":
+                pattern = re.compile(
+                    rf"(^FROM(?:\s+--\S+)*\s+){escaped}(?=\s|$)",
+                    re.IGNORECASE,
+                )
+            elif instruction in {"COPY", "ADD"}:
+                pattern = re.compile(
+                    rf"(--from(?:=|\s+)){escaped}(?=\s|$)",
+                    re.IGNORECASE,
+                )
+            elif instruction == "RUN":
+                pattern = re.compile(
+                    rf"(--mount=(?:[^,\s]+,)*from=){escaped}(?=,|\s|$)",
+                    re.IGNORECASE,
+                )
+            else:
+                continue
+            transformed, count = pattern.subn(rf"\g<1>{target}", transformed)
+            if count:
+                replaced.add(raw)
+        original_block = "".join(block_lines)
+        # A transformed instruction can be normalized to one line without changing Dockerfile
+        # semantics. Untouched instructions retain their exact original formatting.
+        if transformed != logical:
+            ending = "\r\n" if original_block.endswith("\r\n") else "\n"
+            if not original_block.endswith(("\n", "\r")):
+                ending = ""
+            output.append(transformed + ending)
+        else:
+            output.extend(block_lines)
+        heredocs.extend(
+            (
+                match.group("single") or match.group("double") or match.group("bare"),
+                match.group("tabs") == "-",
+            )
+            for match in HEREDOC_RE.finditer(transformed)
+        )
+        parts = []
+        block_lines = []
+    return "".join(output), frozenset(replaced)
+
+
 def _classify(
     raw: str,
     resolved: str | None,

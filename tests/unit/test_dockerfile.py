@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from platform_images.dockerfile import parse_dockerfile
+from platform_images.dockerfile import parse_dockerfile, rewrite_argument_image_references
 from platform_images.models import ReferenceKind
 
 TARGETS = frozenset({"base", "tooling", "curl"})
@@ -202,3 +202,31 @@ def test_unqualified_typo_is_unresolved_instead_of_becoming_external() -> None:
 def test_empty_copy_from_is_unresolved() -> None:
     reference = parse("FROM alpine\nCOPY --from= /out /out\n").references[1]
     assert reference.kind is ReferenceKind.UNRESOLVED
+
+
+def test_rewrite_argument_image_references_changes_only_image_operands() -> None:
+    source = (
+        "ARG REGISTRY\n"
+        "ARG TOOL_IMAGE\n"
+        "FROM --platform=linux/amd64 \\\n"
+        "  ${REGISTRY}/base:latest AS build\n"
+        "COPY --from=${TOOL_IMAGE} /tool /tool\n"
+        "RUN --mount=type=bind,from=${REGISTRY}/base:latest,target=/mnt echo $REGISTRY\n"
+        "RUN <<'SCRIPT'\n"
+        "COPY --from=${TOOL_IMAGE} /not-an-instruction /tmp\n"
+        "SCRIPT\n"
+    )
+
+    rewritten, replaced = rewrite_argument_image_references(
+        source,
+        {
+            "${REGISTRY}/base:latest": "base",
+            "${TOOL_IMAGE}": "tooling",
+        },
+    )
+
+    assert "FROM --platform=linux/amd64 base AS build" in rewritten
+    assert "COPY --from=tooling /tool /tool" in rewritten
+    assert "from=base,target=/mnt echo $REGISTRY" in rewritten
+    assert "COPY --from=${TOOL_IMAGE} /not-an-instruction /tmp" in rewritten
+    assert replaced == frozenset({"${REGISTRY}/base:latest", "${TOOL_IMAGE}"})

@@ -33,7 +33,9 @@ package makes repository conventions explicit and testable.
    building anything.
 8. **Executor** translates plan targets into argument-array Docker Buildx, Podman, Buildah, or
    nerdctl calls. Logical dependencies are bound through exact named `docker-image://` or
-   `container-image://` contexts.
+   `container-image://` contexts. When an internal image operand contains a configured global
+   `ARG`, a temporary Dockerfile rewrites only that operand to its logical context name; unrelated
+   uses of the argument and the checked-in source remain unchanged.
 9. **GitLab renderer** strictly reloads the saved JSON plan, verifies it against the discovered
    graph, and safely serializes jobs. Direct dependencies become `needs`; every plan, including an
    empty one, ends in a commit manifest artifact and exposes a `consume` stage for project tests.

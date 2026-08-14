@@ -345,6 +345,12 @@ The resolved source remains visible in `images show`, and every Docker, Podman, 
 command receives `--build-arg SOURCE_REGISTRY=...`. Values in this table are committed build policy,
 not secrets; registry passwords belong in CI secrets.
 
+For an internal source containing an `ARG`, execution materializes a temporary Dockerfile in which
+only that image operand points at the logical named context. Other uses of the same `ARG` remain
+unchanged, and the checked-in Dockerfile is never edited. This makes prefix expressions such as
+`${SOURCE_REGISTRY}/base:latest` bind to the exact planned parent consistently across Docker,
+Podman, Buildah, and nerdctl instead of letting an engine pull the configured mutable spelling.
+
 During `platform init`, a common observed path such as `gitlab-runner/<logical-target>` becomes the
 single output namespace instead of generating one table per image:
 

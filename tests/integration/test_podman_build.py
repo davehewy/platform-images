@@ -75,8 +75,8 @@ def test_fully_qualified_local_parent_is_replaced_by_planned_image(
         encoding="utf-8",
     )
     (application / "Dockerfile").write_text(
-        "ARG LOCAL_PARENT\n"
-        "FROM ${LOCAL_PARENT}\n"
+        "ARG SOURCE_REGISTRY\n"
+        "FROM ${SOURCE_REGISTRY}/base:latest\n"
         'RUN test "$(cat /parent-marker)" = exact-local-parent\n',
         encoding="utf-8",
     )
@@ -88,7 +88,7 @@ def test_fully_qualified_local_parent_is_replaced_by_planned_image(
                 "--builder",
                 builder,
                 "--build-arg",
-                "LOCAL_PARENT=registry.invalid/gitlab/base:latest",
+                "SOURCE_REGISTRY=registry.invalid/gitlab",
             ],
             cwd=root,
         )

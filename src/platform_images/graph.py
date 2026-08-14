@@ -44,9 +44,9 @@ class ImageGraph:
                 image_reference.kind is ReferenceKind.LOCAL_TARGET
                 and image_reference.resolved in input_refs
             ):
-                contexts[image_reference.source or image_reference.raw] = input_refs[
-                    image_reference.resolved
-                ]
+                reference = input_refs[image_reference.resolved]
+                contexts[image_reference.source or image_reference.raw] = reference
+                contexts[image_reference.raw] = reference
         return dict(sorted(contexts.items()))
 
     def upstream_closure(self, targets: set[str] | frozenset[str]) -> frozenset[str]:
