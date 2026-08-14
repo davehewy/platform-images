@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.8.0 (2026-08-14)
+
+### Features
+
+- **ci**: Publish commit image manifests
+  ([`5eeb508`](https://github.com/davehewy/platform-images/commit/5eeb50827a5f52a56fde1ffafd22f3434b3ff9d4))
+
+
 ## v0.7.0 (2026-08-14)
 
 ### Documentation
