@@ -198,11 +198,12 @@ from the existing layout:
 platform init
 ```
 
-`init` scans for existing `Dockerfile` and `Containerfile` targets, infers every non-overlapping
-parent directory as a discovery root, and writes a Docker-based starter `platform-images.toml`. It
-also adds inferred short external bases such as `alpine` to the starter allowlist and prints them
-for review; references resembling a local target typo remain validation errors. It never moves an
-image, assumes a fixed root name, or overwrites an existing configuration.
+`init` scans for existing `Dockerfile` and `Containerfile` targets, infers their parent directories
+as discovery roots, and writes a Docker-based starter `platform-images.toml`. Discovery roots can
+live at any depth and can be nested—for example, `utils` and `utils/container-images` can coexist.
+It also adds inferred short external bases such as `alpine` to the starter allowlist and prints
+them for review; references resembling a local target typo remain validation errors. It never
+moves an image, assumes a fixed root name, or overwrites an existing configuration.
 
 If auto-discovery is intentionally broader than the ownership areas you want, name each existing
 target parent directory explicitly. The directories can be anywhere beneath the repository:
@@ -795,8 +796,21 @@ collector
 A change beneath `services/payments/container-images/api/` selects only `api`; a change beneath
 `containers/shared/base/` selects `base`, `api`, and `worker`. The roots only locate targets—the
 target names and inferred edges are global. Consequently, defining `api` beneath two roots is an
-error with both paths reported, as is configuring roots that overlap. Those checks prevent a Git
-path from binding to one target while a Dockerfile reference binds to another.
+error with both paths reported.
+
+Roots may be nested when a repository has ownership areas at different depths:
+
+```toml
+[discovery]
+roots = ["utils", "utils/container-images"]
+```
+
+With that configuration, `utils/tool/Dockerfile` defines `tool`, while
+`utils/container-images/api/Dockerfile` defines `api`. The `container-images` grouping directory is
+not mistaken for a target. Matching considers every configured root, so if `utils/container-images`
+is itself a real outer target with a build file, changes in a more deeply nested target select both
+the nested target and the containing image context. This keeps rebuild detection conservative when
+Docker build contexts genuinely nest.
 
 ## From commit build to semantic release
 
@@ -1012,7 +1026,7 @@ promotion moves only the stable alias after success.
 
 | Setting | What it controls | When and why to change it |
 | --- | --- | --- |
-| `discovery.roots` | Non-empty array of repository-relative directories whose direct children are logical image targets. Defaults to `["images"]`. | Include each existing ownership area that contains image targets, whether central or service-local. Roots cannot be absolute, escape through `..`, duplicate one another, or overlap. |
+| `discovery.roots` | Non-empty array of repository-relative directories whose direct children are logical image targets. Defaults to `["images"]`. Nested roots delegate their branch to the more specific root unless the branch has its own build file. | Include each existing ownership area that contains image targets, whether central, service-local, deeply nested, or beneath another ownership area. Roots cannot be absolute, escape through `..`, or duplicate one another. |
 | `discovery.root` | Backward-compatible singular form for one root. | Existing configurations may keep it. New configurations should use `roots`, even for one location, so adding another is a one-line change. Do not set both forms. |
 
 For example, this discovers `base`, `api`, and `worker` without a registration list:

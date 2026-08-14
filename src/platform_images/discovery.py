@@ -25,10 +25,23 @@ def inspect_targets(
     roots = (
         (discovery_roots,) if isinstance(discovery_roots, str | Path) else tuple(discovery_roots)
     )
+    root_paths = tuple(sorted(Path(value) for value in roots))
+    folded_root_parts = tuple(
+        tuple(part.casefold() for part in discovery_root.parts) for discovery_root in root_paths
+    )
+    nested_branches = tuple(
+        frozenset(
+            other_parts[len(current_parts)]
+            for other_parts in folded_root_parts
+            if len(other_parts) > len(current_parts)
+            and other_parts[: len(current_parts)] == current_parts
+        )
+        for current_parts in folded_root_parts
+    )
     targets: dict[str, ImageTarget] = {}
     entries: list[ImageTarget] = []
     missing_roots: list[str] = []
-    for discovery_root in sorted(Path(value) for value in roots):
+    for discovery_root, delegated_branches in zip(root_paths, nested_branches, strict=True):
         target_root = root / discovery_root
         if not target_root.is_dir():
             missing_roots.append(discovery_root.as_posix())
@@ -39,6 +52,13 @@ def inspect_targets(
         ):
             dockerfile = directory / "Dockerfile"
             containerfile = directory / "Containerfile"
+            # An ancestor discovery root may contain a grouping directory that leads to a more
+            # specific root. It is a boundary, not an image target, unless it has its own build
+            # file. A real outer target is retained because its context can include nested targets.
+            if directory.name.casefold() in delegated_branches and not (
+                dockerfile.is_file() or containerfile.is_file()
+            ):
+                continue
             build_file = (
                 dockerfile if dockerfile.exists() or not containerfile.exists() else containerfile
             )

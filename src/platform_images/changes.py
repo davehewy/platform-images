@@ -90,15 +90,22 @@ def _matches(path: str, patterns: Sequence[str]) -> bool:
     return False
 
 
-def _target_for_path(
+def _targets_for_path(
     path: str,
     discovery_roots: tuple[tuple[str, ...], ...],
-) -> str | None:
+) -> tuple[tuple[str, bool], ...]:
     parts = PurePosixPath(path).parts
+    matches: list[tuple[str, bool]] = []
     for root_parts in discovery_roots:
         if len(parts) >= len(root_parts) + 2 and parts[: len(root_parts)] == root_parts:
-            return parts[len(root_parts)]
-    return None
+            matches.append(
+                (
+                    parts[len(root_parts)],
+                    len(parts) == len(root_parts) + 2
+                    and parts[-1] in {"Dockerfile", "Containerfile"},
+                )
+            )
+    return tuple(matches)
 
 
 def map_changes(
@@ -119,15 +126,11 @@ def map_changes(
         for path in change.paths:
             if _matches(path, global_inputs):
                 global_paths.add(path)
-            target_name = _target_for_path(path, discovery_roots)
-            if target_name is None:
-                continue
-            if target_name in target_names:
-                reasons.setdefault(target_name, set()).add(f"source-changed:{path}")
-            elif change.status.startswith(("D", "R")) and path.endswith(
-                ("/Dockerfile", "/Containerfile")
-            ):
-                removed.add(target_name)
+            for target_name, direct_build_file in _targets_for_path(path, discovery_roots):
+                if target_name in target_names:
+                    reasons.setdefault(target_name, set()).add(f"source-changed:{path}")
+                elif change.status.startswith(("D", "R")) and direct_build_file:
+                    removed.add(target_name)
     if global_paths:
         for target_name in target_names:
             for path in global_paths:

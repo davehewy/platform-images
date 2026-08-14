@@ -80,6 +80,39 @@ def test_inspection_preserves_duplicate_entries_across_roots(
     assert [entry.name for entry in discovery.entries] == ["api", "api"]
 
 
+def test_nested_root_branch_is_not_mistaken_for_an_image_target(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory({})
+    tool = root / "utils" / "tool"
+    api = root / "utils" / "container-images" / "api"
+    tool.mkdir(parents=True)
+    api.mkdir(parents=True)
+    (tool / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    (api / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+
+    discovery = inspect_targets(root, ("utils", "utils/container-images"))
+
+    assert list(discovery.targets) == ["api", "tool"]
+    assert [entry.name for entry in discovery.entries] == ["tool", "api"]
+
+
+def test_outer_target_with_build_file_is_retained_alongside_nested_root(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory({})
+    outer = root / "containers" / "service"
+    api = outer / "images" / "api"
+    api.mkdir(parents=True)
+    (outer / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    (api / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+
+    discovery = inspect_targets(root, ("containers", "containers/service/images"))
+
+    assert list(discovery.targets) == ["api", "service"]
+    assert {entry.directory for entry in discovery.entries} == {outer, api}
+
+
 def test_target_name_rules() -> None:
     assert valid_target_name("new-tool")
     assert valid_target_name("python_3.12")

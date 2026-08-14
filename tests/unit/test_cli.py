@@ -160,9 +160,7 @@ def test_init_without_an_inferable_layout_explains_explicit_roots(tmp_path: Path
     assert "pass --discovery-root PATH" in capsys.readouterr().err
 
 
-def test_init_rejects_overlapping_inferred_roots_without_writing_config(
-    tmp_path: Path, capsys
-) -> None:
+def test_init_supports_nested_inferred_roots(tmp_path: Path, capsys) -> None:
     root = tmp_path / "repository"
     first = root / "containers" / "base"
     nested = root / "containers" / "service" / "images" / "api"
@@ -171,12 +169,14 @@ def test_init_rejects_overlapping_inferred_roots_without_writing_config(
     (first / "Dockerfile").write_text("FROM alpine\n", encoding="utf-8")
     (nested / "Dockerfile").write_text("FROM alpine\n", encoding="utf-8")
 
-    assert main(["init"], cwd=root, environment={}) == 1
+    assert main(["init"], cwd=root, environment={}) == 0
 
-    assert not (root / "platform-images.toml").exists()
-    error = capsys.readouterr().err
-    assert "discovery roots must not overlap" in error
-    assert "containers and containers/service/images" in error
+    config = RepositoryConfig.load(root)
+    assert config.discovery.roots == ("containers", "containers/service/images")
+    assert validate_repository(config).valid
+    output = capsys.readouterr().out
+    assert "Discovered 2 image targets across 2 roots:" in output
+    assert "containers/service/images" in output
 
 
 def test_init_rejects_repository_root_build_file(tmp_path: Path, capsys) -> None:

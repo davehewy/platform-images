@@ -166,7 +166,6 @@ def test_discovery_root_and_roots_cannot_both_be_set(
     (
         "[]",
         '["images", "images"]',
-        '["containers", "containers/team-a"]',
         '["../images"]',
     ),
 )

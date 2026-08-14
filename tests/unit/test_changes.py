@@ -125,6 +125,59 @@ def test_path_mapping_uses_every_configured_discovery_root(
     }
 
 
+def test_path_mapping_marks_nested_and_containing_image_contexts(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory({})
+    config_path = root / "platform-images.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        + '\n[discovery]\nroots = ["containers", "containers/service/images"]\n',
+        encoding="utf-8",
+    )
+    config = RepositoryConfig.load(root)
+
+    changes = map_changes(
+        (
+            ChangedPath("M", None, "containers/service/images/api/source/application.py"),
+            ChangedPath("D", "containers/service/images/retired/Dockerfile", None),
+        ),
+        {"api": object(), "service": object()},
+        config,
+    )
+
+    assert changes.changed_targets == {"api", "service"}
+    assert changes.removed_targets == {"retired"}
+    assert changes.reasons == {
+        "api": ("source-changed:containers/service/images/api/source/application.py",),
+        "service": (
+            "source-changed:containers/service/images/api/source/application.py",
+            "source-changed:containers/service/images/retired/Dockerfile",
+        ),
+    }
+
+
+def test_removed_target_in_nested_root_does_not_invent_an_ancestor_target(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory({})
+    config_path = root / "platform-images.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        + '\n[discovery]\nroots = ["utils", "utils/container-images"]\n',
+        encoding="utf-8",
+    )
+
+    changes = map_changes(
+        (ChangedPath("D", "utils/container-images/retired/Dockerfile", None),),
+        {"api": object()},
+        RepositoryConfig.load(root),
+    )
+
+    assert changes.changed_targets == set()
+    assert changes.removed_targets == {"retired"}
+
+
 def test_real_git_modify_add_rename_remove_and_spaces(git_repository: Path) -> None:
     root = git_repository
     config = RepositoryConfig.load(root)

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from platform_images.backends import default_transport, validate_execution_pair
 from platform_images.config import NAMESPACE_RE, RepositoryConfig
+from platform_images.discovery import inspect_targets
 from platform_images.dockerfile import parse_dockerfile
 from platform_images.errors import PlatformImagesError
 from platform_images.models import BuildBackend, ReferenceKind, RegistryTransport
@@ -89,17 +90,6 @@ def _normalize_roots(root: Path, values: tuple[str, ...]) -> tuple[str, ...]:
     folded = [value.casefold() for value in ordered]
     if len(folded) != len(set(folded)):
         raise PlatformImagesError("discovery roots must be unique")
-    for index, left in enumerate(folded):
-        left_parts = Path(left).parts
-        for right_index in range(index + 1, len(folded)):
-            right_parts = Path(folded[right_index]).parts
-            shared = min(len(left_parts), len(right_parts))
-            if left_parts[:shared] == right_parts[:shared]:
-                raise PlatformImagesError(
-                    "discovery roots must not overlap: "
-                    f"{ordered[index]} and {ordered[right_index]}. "
-                    "Choose separate target parent directories."
-                )
     return ordered
 
 
@@ -123,19 +113,14 @@ def _infer_roots(root: Path) -> tuple[str, ...]:
 
 def _target_directories(root: Path, discovery_roots: tuple[str, ...]) -> tuple[Path, ...]:
     directories: list[Path] = []
-    for discovery_root in discovery_roots:
-        candidates = sorted(
-            (entry for entry in (root / discovery_root).iterdir() if entry.is_dir()),
-            key=lambda entry: entry.name,
-        )
-        for candidate in candidates:
-            try:
-                candidate.resolve().relative_to(root)
-            except ValueError as exc:
-                raise PlatformImagesError(
-                    f"image target directory resolves outside the repository: {candidate}"
-                ) from exc
-            directories.append(candidate)
+    for target in inspect_targets(root, discovery_roots).entries:
+        try:
+            target.directory.resolve().relative_to(root)
+        except ValueError as exc:
+            raise PlatformImagesError(
+                f"image target directory resolves outside the repository: {target.directory}"
+            ) from exc
+        directories.append(target.directory)
     return tuple(directories)
 
 

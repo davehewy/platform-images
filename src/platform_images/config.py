@@ -188,18 +188,6 @@ class RepositoryConfig:
         folded_roots = [value.casefold() for value in normalized_roots]
         if len(folded_roots) != len(set(folded_roots)):
             raise ConfigurationError("discovery roots must be unique")
-        for index, left in enumerate(folded_roots):
-            left_parts = Path(left).parts
-            for right_index in range(index + 1, len(folded_roots)):
-                right = folded_roots[right_index]
-                right_parts = Path(right).parts
-                shared = min(len(left_parts), len(right_parts))
-                if left_parts[:shared] == right_parts[:shared]:
-                    raise ConfigurationError(
-                        "discovery roots must not overlap: "
-                        f"{normalized_roots[index]} and "
-                        f"{normalized_roots[right_index]}"
-                    )
         return cls(
             root=root,
             registry=registry,
