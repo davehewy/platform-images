@@ -56,7 +56,7 @@ from platform_images.registry import (
     registry_from_environment_json,
 )
 from platform_images.renderers.github import render_github_outputs, render_github_workflow
-from platform_images.renderers.gitlab import render_gitlab
+from platform_images.renderers.gitlab import GITLAB_DEFAULT_JOB_LIMIT, render_gitlab
 from platform_images.renderers.graph_json import graph_data, render_graph_json
 from platform_images.renderers.graph_text import render_graph_text
 from platform_images.renderers.plan_json import load_plan_json, render_plan_json
@@ -281,6 +281,12 @@ Run 'platform images COMMAND --help' for command-specific options.
     plan.add_argument("--head")
     plan.add_argument("--ci", action="store_true")
     plan.add_argument("--format", choices=("text", "json", "gitlab"), default="text")
+    plan.add_argument(
+        "--gitlab-max-jobs",
+        type=int,
+        default=GITLAB_DEFAULT_JOB_LIMIT,
+        help=(f"configured GitLab per-pipeline job limit (default: {GITLAB_DEFAULT_JOB_LIMIT})"),
+    )
 
     render_plan = commands.add_parser(
         "render-plan",
@@ -289,6 +295,12 @@ Run 'platform images COMMAND --help' for command-specific options.
     )
     render_plan.add_argument("plan_file", type=Path)
     render_plan.add_argument("--format", choices=("text", "json", "gitlab"), default="gitlab")
+    render_plan.add_argument(
+        "--gitlab-max-jobs",
+        type=int,
+        default=GITLAB_DEFAULT_JOB_LIMIT,
+        help=(f"configured GitLab per-pipeline job limit (default: {GITLAB_DEFAULT_JOB_LIMIT})"),
+    )
 
     ci_build = commands.add_parser(
         "ci-build",
@@ -395,7 +407,18 @@ Run 'platform images COMMAND --help' for command-specific options.
         description="Render dependency-layered GitHub matrix outputs from a CI plan.",
     )
     github_matrix.add_argument("plan_file", type=Path)
-    github_matrix.add_argument("--max-layers", type=int, required=True)
+    github_matrix.add_argument(
+        "--max-layers",
+        type=int,
+        required=True,
+        help="static dependency layers available in the generated workflow",
+    )
+    github_matrix.add_argument(
+        "--max-shards",
+        type=int,
+        default=1,
+        help="parallel matrix jobs available per layer (default: 1)",
+    )
 
     workflow = commands.add_parser(
         "generate-workflow",
@@ -929,7 +952,15 @@ def _run(arguments: argparse.Namespace, cwd: Path | None, environment: Mapping[s
             registry = environment.get(config.registry.registry_environment_variable)
             if not registry:
                 raise PlatformImagesError("registry is required for GitLab rendering")
-            print(render_gitlab(plan, config, registry), end="")
+            print(
+                render_gitlab(
+                    plan,
+                    config,
+                    registry,
+                    max_jobs=arguments.gitlab_max_jobs,
+                ),
+                end="",
+            )
         else:
             print(render_plan_text(plan))
         return 0
@@ -945,7 +976,15 @@ def _run(arguments: argparse.Namespace, cwd: Path | None, environment: Mapping[s
             registry = environment.get(config.registry.registry_environment_variable)
             if not registry:
                 raise PlatformImagesError("registry is required for GitLab rendering")
-            print(render_gitlab(plan, config, registry), end="")
+            print(
+                render_gitlab(
+                    plan,
+                    config,
+                    registry,
+                    max_jobs=arguments.gitlab_max_jobs,
+                ),
+                end="",
+            )
         return 0
     if arguments.command == "ci-build":
         builder, transport = _execution(arguments, config)
@@ -1080,7 +1119,7 @@ def _run(arguments: argparse.Namespace, cwd: Path | None, environment: Mapping[s
         plan = _load_plan(arguments.plan_file, graph, config)
         if plan.mode is BuildMode.LOCAL:
             raise PlatformImagesError("github-matrix requires a CI plan")
-        print(render_github_outputs(plan, arguments.max_layers))
+        print(render_github_outputs(plan, arguments.max_layers, arguments.max_shards))
         return 0
     if arguments.command == "generate-workflow":
         builder, transport = _execution(

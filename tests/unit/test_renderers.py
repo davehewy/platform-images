@@ -13,7 +13,9 @@ from platform_images.graph import build_graph
 from platform_images.models import BuildBackend, BuildMode, BuildPlan, RegistryTransport
 from platform_images.planner import all_ci_plan, local_plan
 from platform_images.renderers.github import (
+    GITHUB_MATRIX_JOB_LIMIT,
     graph_layer_count,
+    graph_parallel_width_bound,
     plan_layers,
     render_github_outputs,
     render_github_workflow,
@@ -103,6 +105,49 @@ def test_default_branch_has_one_graph_gated_promotion_job(
     assert all(":main" in command for command in document["promote_main"]["script"])
 
 
+def test_gitlab_renderer_checks_the_complete_child_pipeline_job_budget(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory({"base": "FROM alpine\n"})
+    config, graph = state(root)
+    merge_request = all_ci_plan(
+        graph,
+        config,
+        head_sha="abc",
+        mode=BuildMode.MERGE_REQUEST,
+        registry="registry.example.com",
+        pipeline_id="123",
+    )
+    default_branch = all_ci_plan(
+        graph,
+        config,
+        head_sha="abc",
+        mode=BuildMode.DEFAULT_BRANCH,
+        registry="registry.example.com",
+        pipeline_id="123",
+    )
+
+    assert "publish_image_manifest" in yaml.safe_load(
+        render_gitlab(merge_request, config, "registry.example.com", max_jobs=2)
+    )
+    with pytest.raises(
+        PlatformImagesError,
+        match=r"requires 3 jobs \(1 image builds, manifest, promotion\)",
+    ):
+        render_gitlab(default_branch, config, "registry.example.com", max_jobs=2)
+
+
+def test_gitlab_renderer_rejects_an_invalid_job_limit(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory({"base": "FROM alpine\n"})
+    config, _graph = state(root)
+    no_changes = BuildPlan(1, BuildMode.MERGE_REQUEST, "a", "b", (), ())
+
+    with pytest.raises(PlatformImagesError, match="must be at least 1"):
+        render_gitlab(no_changes, config, "registry.example.com", max_jobs=0)
+
+
 def test_gitlab_manifest_stage_avoids_a_wide_needs_fan_in(
     repository_factory: Callable[[dict[str, str]], Path],
 ) -> None:
@@ -177,6 +222,115 @@ def test_github_matrix_fails_when_checked_in_workflow_is_stale(
     )
     with pytest.raises(PlatformImagesError, match="regenerate"):
         render_github_outputs(plan, 1)
+
+
+def test_github_wide_layers_are_sharded_at_the_provider_limit(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    image_count = GITHUB_MATRIX_JOB_LIMIT + 1
+    root = repository_factory(
+        {f"image-{index:03d}": "FROM alpine\n" for index in range(image_count)}
+    )
+    config, graph = state(root)
+    plan = all_ci_plan(
+        graph,
+        config,
+        head_sha="abc",
+        mode=BuildMode.MERGE_REQUEST,
+        registry="registry.example.com",
+        pipeline_id="123",
+    )
+
+    assert graph_parallel_width_bound(graph) == image_count
+    output = dict(line.split("=", 1) for line in render_github_outputs(plan, 1, 2).splitlines())
+    first = yaml.safe_load(output["layer_0_shard_0"])["include"]
+    second = yaml.safe_load(output["layer_0_shard_1"])["include"]
+    assert len(first) == GITHUB_MATRIX_JOB_LIMIT
+    assert len(second) == 1
+    assert {entry["target"] for entry in first + second} == set(graph.targets)
+
+    document = yaml.safe_load(render_github_workflow(graph, config))
+    jobs = document["jobs"]
+    first_job = jobs["image_layer_0_shard_0"]
+    second_job = jobs["image_layer_0_shard_1"]
+    assert first_job["needs"] == ["plan"]
+    assert second_job["needs"] == ["plan"]
+    assert first_job["strategy"]["matrix"] == (
+        "${{ fromJSON(needs.plan.outputs.layer_0_shard_0) }}"
+    )
+    assert jobs["manifest"]["needs"] == [
+        "plan",
+        "image_layer_0_shard_0",
+        "image_layer_0_shard_1",
+    ]
+    matrix_command = next(
+        step["run"]
+        for step in jobs["plan"]["steps"]
+        if step.get("name") == "Create dependency-safe build matrices"
+    )
+    assert "--max-shards 2" in matrix_command
+
+
+def test_github_matrix_rejects_a_wide_plan_when_the_workflow_has_too_few_shards(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory(
+        {f"image-{index:03d}": "FROM alpine\n" for index in range(GITHUB_MATRIX_JOB_LIMIT + 1)}
+    )
+    config, graph = state(root)
+    plan = all_ci_plan(
+        graph,
+        config,
+        head_sha="abc",
+        mode=BuildMode.MERGE_REQUEST,
+        registry="registry.example.com",
+        pipeline_id="123",
+    )
+
+    with pytest.raises(PlatformImagesError, match="requires 2 GitHub matrix shards"):
+        render_github_outputs(plan, 1)
+
+
+def test_github_shard_bound_does_not_multiply_deep_narrow_graphs(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory(
+        {
+            "root": "FROM alpine\n",
+            "middle": "FROM root\n",
+            "leaf": "FROM middle\n",
+        }
+    )
+    config, graph = state(root)
+
+    assert graph_parallel_width_bound(graph) == 1
+    jobs = yaml.safe_load(render_github_workflow(graph, config))["jobs"]
+    assert {job_id for job_id in jobs if job_id.startswith("image_layer_")} == {
+        "image_layer_0",
+        "image_layer_1",
+        "image_layer_2",
+    }
+
+
+def test_github_shard_bound_covers_antichains_spanning_static_depths(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory(
+        {
+            "a": "FROM alpine\n",
+            "b": "FROM alpine\n",
+            "c": "FROM a\n",
+            "d": "FROM a\n",
+            "e": "FROM d\n",
+        }
+    )
+    _config, graph = state(root)
+
+    # b, c, and e are mutually independent even though they occupy three different longest-path
+    # depths. Bounding only the widest static depth (two) would therefore be unsafe for a partial
+    # affected plan that selects those three leaves.
+    assert graph_layer_count(graph) == 3
+    assert graph_parallel_width_bound(graph) == 3
 
 
 def test_generated_github_workflow_has_static_waves_dynamic_matrices_and_gated_promotion(

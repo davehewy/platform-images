@@ -5,8 +5,11 @@ import shlex
 import yaml
 
 from platform_images.config import RepositoryConfig
+from platform_images.errors import PlatformImagesError
 from platform_images.models import BuildMode, BuildPlan
 from platform_images.references import ReferencePolicy
+
+GITLAB_DEFAULT_JOB_LIMIT = 500
 
 
 def job_name(target: str) -> str:
@@ -21,7 +24,25 @@ def job_name(target: str) -> str:
     return "image_" + escaped
 
 
-def render_gitlab(plan: BuildPlan, config: RepositoryConfig, registry: str) -> str:
+def render_gitlab(
+    plan: BuildPlan,
+    config: RepositoryConfig,
+    registry: str,
+    *,
+    max_jobs: int = GITLAB_DEFAULT_JOB_LIMIT,
+) -> str:
+    if max_jobs < 1:
+        raise PlatformImagesError("--gitlab-max-jobs must be at least 1")
+    promotion_jobs = 1 if plan.mode is BuildMode.DEFAULT_BRANCH and plan.targets else 0
+    required_jobs = len(plan.targets) + 1 + promotion_jobs
+    if required_jobs > max_jobs:
+        promotion_note = ", promotion" if promotion_jobs else ""
+        raise PlatformImagesError(
+            f"generated GitLab child pipeline requires {required_jobs} jobs "
+            f"({len(plan.targets)} image builds, manifest{promotion_note}), exceeding "
+            f"--gitlab-max-jobs {max_jobs}; set that option to the limit configured for your "
+            "GitLab tier or instance, or reduce the number of targets in one pipeline"
+        )
     manifest_command = [
         "platform",
         "images",
