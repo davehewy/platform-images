@@ -70,6 +70,50 @@ def test_init_cascades_one_repository_policy_across_320_images(tmp_path: Path, c
     assert "init applied 8 inferred repository mappings" in output
 
 
+def test_reconcile_adds_only_eight_exceptions_across_320_existing_images(
+    tmp_path: Path, capsys
+) -> None:
+    root = tmp_path / "large-existing-repository"
+    targets = root / "owned" / "container-images"
+
+    def logical_name(index: int) -> str:
+        return f"service{index:03d}" if index % 40 == 0 else f"service-{index:03d}"
+
+    for index in range(320):
+        directory = targets / logical_name(index)
+        directory.mkdir(parents=True)
+        (directory / "Dockerfile").write_text("FROM alpine:3.22\n", encoding="utf-8")
+
+    assert main(["init", "--namespace", "risk-repo"], cwd=root, environment={}) == 0
+    capsys.readouterr()
+    for index in range(0, 320, 40):
+        consumer = targets / logical_name(index + 1) / "Dockerfile"
+        consumer.write_text(
+            f"FROM nexus.example.com:8088/risk-repo/service-{index:03d}:latest\n",
+            encoding="utf-8",
+        )
+
+    assert main(["reconcile"], cwd=root, environment={}) == 0
+
+    config = RepositoryConfig.load(root)
+    report = validate_repository(config)
+    assert report.valid
+    assert not report.warnings
+    assert len(config.images) == 8
+    assert all(
+        config.image_repository(logical_name(index)) == f"risk-repo/service-{index:03d}"
+        for index in range(0, 320, 40)
+    )
+    output = capsys.readouterr().out
+    assert "Applied 8 high-confidence repository mappings" in output
+
+    configuration = root / "platform-images.toml"
+    reconciled = configuration.read_text(encoding="utf-8")
+    assert main(["reconcile"], cwd=root, environment={}) == 0
+    assert configuration.read_text(encoding="utf-8") == reconciled
+    assert "Configuration already reconciled" in capsys.readouterr().out
+
+
 @pytest.fixture(scope="module")
 def imperfect_repository(
     tmp_path_factory: pytest.TempPathFactory,

@@ -24,7 +24,7 @@ from platform_images.changes import (
 )
 from platform_images.config import RepositoryConfig
 from platform_images.errors import PlatformImagesError
-from platform_images.initialization import initialize_repository
+from platform_images.initialization import initialize_repository, reconcile_repository
 from platform_images.manifests import (
     build_manifest_data,
     load_build_manifest,
@@ -95,6 +95,7 @@ def _parser() -> argparse.ArgumentParser:
         epilog="""\
 examples:
   platform init
+  platform reconcile
   platform images validate
   platform images graph
   platform images build api --dry-run
@@ -183,6 +184,32 @@ examples:
         default=[],
         metavar="NAME=VALUE",
         help="checked-in Dockerfile ARG value used for graphing and builds; repeat as needed",
+    )
+
+    reconcile = root_subparsers.add_parser(
+        "reconcile",
+        help="update existing configuration from high-confidence repository evidence",
+        description=(
+            "Reconcile platform-images.toml with newly discovered external bases and qualified "
+            "references. Existing output policy remains authoritative, manual settings are "
+            "preserved, and only unique high-confidence additions are written."
+        ),
+        epilog="""\
+examples:
+  platform reconcile
+  platform reconcile --check
+""",
+    )
+    reconcile.add_argument(
+        "--root",
+        type=Path,
+        default=None,
+        help="repository root (default: current directory or PLATFORM_IMAGES_ROOT)",
+    )
+    reconcile.add_argument(
+        "--check",
+        action="store_true",
+        help="print the proposed diff without writing and fail when updates are available",
     )
 
     images = root_subparsers.add_parser(
@@ -563,6 +590,57 @@ def _run_init(arguments: argparse.Namespace, cwd: Path | None) -> int:
     return 0
 
 
+def _run_reconcile(arguments: argparse.Namespace, cwd: Path | None) -> int:
+    root = _root(arguments, cwd)
+    result = reconcile_repository(root, write=not arguments.check)
+    relative_configuration = result.configuration_path.relative_to(root).as_posix()
+
+    if result.changed:
+        if arguments.check:
+            print(f"Configuration reconciliation required: {relative_configuration}")
+        else:
+            print(f"Updated {relative_configuration}")
+        if result.added_short_external_images:
+            print("Added unambiguous short external images:")
+            for image in result.added_short_external_images:
+                print(f"  - {image}")
+        if result.repository_inferences:
+            mapping_word = "mapping" if len(result.repository_inferences) == 1 else "mappings"
+            print(
+                f"Applied {len(result.repository_inferences)} high-confidence repository "
+                f"{mapping_word}:"
+            )
+            for inference in result.repository_inferences:
+                reference_word = "reference" if inference.reference_count == 1 else "references"
+                print(
+                    f"  - {inference.source_repository} -> {inference.target} "
+                    f"({inference.confidence}, {inference.reference_count} {reference_word}; "
+                    f"{inference.action})"
+                )
+        print()
+        print(result.diff, end="" if result.diff.endswith("\n") else "\n")
+        if arguments.check:
+            print("Run 'platform reconcile' to apply these exact updates.")
+            return 1
+    else:
+        print(f"Configuration already reconciled: {relative_configuration}")
+
+    report = result.validation_report
+    if report.valid:
+        target_word = "target" if result.target_count == 1 else "targets"
+        print(f"Validation passed ({result.target_count} image {target_word}).")
+        if report.warnings:
+            _summary, _separator, warning_details = _render_validation(report, "text").partition(
+                "\n\n"
+            )
+            print()
+            print(warning_details)
+        return 0
+
+    print(_render_validation(report, "text"), file=sys.stderr)
+    return 1
+
+
 def _issue_data(issue: ValidationIssue) -> dict[str, object]:
     return {
         "code": issue.code,
@@ -851,6 +929,8 @@ def _run(arguments: argparse.Namespace, cwd: Path | None, environment: Mapping[s
         return 0
     if arguments.group == "init":
         return _run_init(arguments, cwd)
+    if arguments.group == "reconcile":
+        return _run_reconcile(arguments, cwd)
 
     root = _root(arguments, cwd)
     config = RepositoryConfig.load(root)

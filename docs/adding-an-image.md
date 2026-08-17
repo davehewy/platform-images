@@ -15,7 +15,8 @@
    On first adoption, `platform init` pairs unique separator variants and strong isolated
    near-matches, persists exact mappings, and reports its guesses once for review. It applies a
    common repository namespace globally and writes image tables only for naming exceptions.
-   `platform images validate` groups any later unresolved occurrences by remote repository and
+   `platform reconcile` applies unique high-confidence additions against an existing configuration;
+   `platform images validate` groups any remaining unresolved occurrences by remote repository and
    recommends one primary mapping for all consumers.
    If a qualified source is assembled from a global `ARG` without a default, configure its
    deterministic value under `[dockerfile.arguments]`. The controller uses it for graph parsing and
@@ -27,7 +28,8 @@
    If a new external base uses an unqualified name such as `debian`, add that repository name to
    `dockerfile.allowed_short_external_images` in `platform-images.toml`; alternatively use a
    registry-qualified reference. This explicit distinction catches local dependency typos.
-3. Run `platform images validate`.
+3. Run `platform reconcile`, review its exact configuration diff, then run
+   `platform images validate`. Use `platform reconcile --check` as a non-writing CI drift gate.
 4. Inspect `platform images graph` and, for automation, `platform images graph --format json`.
 5. Build locally with `platform images build <name>`. Use the configured backend or override it
    with `--builder docker`, `podman`, `buildah`, or `nerdctl`.
@@ -41,6 +43,6 @@ unless they are intentionally shared and listed as a global controller input.
 An internal repository reference whose target does not exist, an identity claimed by multiple
 targets, an unresolved build-time-only `ARG`, or a local dependency cycle fails validation before a
 build plan can be generated. The unresolved-ARG error prints the `[dockerfile.arguments]` remedy. A
-qualified near-match not already reconciled by `init` is reported once per repository and remains
-external until it is mapped; add it to `identity.external_repositories` instead when that is
-intentional.
+qualified near-match not already reconciled by `init` or `reconcile` is reported once per
+repository and remains external until it is mapped; add it to `identity.external_repositories`
+instead when that is intentional.
