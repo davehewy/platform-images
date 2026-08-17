@@ -64,6 +64,7 @@ before consumers, while unrelated nodes remain parallelizable.
 - [Worked examples](#worked-examples)
 - [From commit build to semantic release](#from-commit-build-to-semantic-release)
 - [Configuration capabilities](#configuration-capabilities)
+- [Configuration reconciliation](docs/reconciliation.md)
 - [Container backend compatibility](docs/container-backends.md)
 - [Recommended adoption flow](#recommended-adoption-flow)
 - [Command guide](#command-guide)
@@ -246,6 +247,18 @@ platform init \
 Use `--builder podman`, `buildah`, or `nerdctl` when Docker is not the team's default. `init` chooses
 the matching registry transport unless `--registry-transport` is set explicitly. Run
 `platform init --help` to see all initialization choices.
+
+As that repository evolves, rerun the inference safely against the existing configuration:
+
+```bash
+platform reconcile
+```
+
+It adds only unambiguous external bases and repository identity exceptions, prints the exact diff,
+preserves existing output policy, comments, newlines, and file permissions, and rolls back if an
+inferred edge introduces a new validation error. Use `platform reconcile --check` in CI to detect
+available updates without modifying the checkout. See [configuration
+reconciliation](docs/reconciliation.md) for the complete merge and safety rules.
 
 If a Dockerfile obtains a registry prefix or complete parent reference from a global `ARG` without
 a default, provide the deterministic checked-in value during initialization:
@@ -456,7 +469,8 @@ containers/application/Dockerfile:1
   nexus.example.com/gitlab-runner/ubuntu24-base
 ```
 
-When that spelling is only an accepted dependency input, use the single recommended alias:
+When that spelling is only an accepted dependency input, `platform reconcile` can apply the single
+recommended alias:
 
 ```toml
 [images."ubuntu24-04-base"]
@@ -1267,9 +1281,11 @@ remote-to-local repository matches, and validates the resulting exact graph. Pas
 `--discovery-root` options when you want to declare ownership areas explicitly, `--namespace` when
 the registry hierarchy differs from the repository name, and `--builder` when Docker is not the
 right default. The command refuses to replace `platform-images.toml`; configuration changes after
-initialization remain ordinary reviewed source changes. Review the short external image allowlist
-and the compact inferred-repository audit printed by `init` before committing it. Automatic guesses
-are persisted as exact configuration; genuine ambiguities remain grouped review warnings.
+initialization can use `platform reconcile` for additive high-confidence updates while retaining
+the existing namespace, output overrides, discovery roots, unrelated settings, and comments. It
+prints a reviewable diff and inference audit; genuine ambiguities remain grouped warnings. Use
+`--check` to enforce that drift in CI. Namespace changes, output redirection, discovery ownership
+changes, and removal of old mappings remain ordinary reviewed source changes.
 
 This repository's complete configuration is:
 
@@ -1541,25 +1557,27 @@ job, deploy, or robot-account tokens over personal long-lived passwords.
 2. Run `platform init` and review its repository-inference audit. Prefer logical references such as
    `FROM base` for new files; established qualified references can remain unchanged when the
    inferred mappings are correct.
-3. Configure broad policy once—the registry namespace, stable tag, approved short external images,
+3. Run `platform reconcile` when later image or reference changes have safe inferred updates, or
+   `platform reconcile --check` as a CI drift gate.
+4. Configure broad policy once—the registry namespace, stable tag, approved short external images,
    and genuine shared inputs. Keep per-target repository overrides and aliases for actual naming
    exceptions only.
-4. Choose `build.backend` and `registry.transport`, then run `platform images validate`, `graph`,
+5. Choose `build.backend` and `registry.transport`, then run `platform images validate`, `graph`,
    and `build <leaf> --dry-run` locally. Review the inferred graph with image owners.
-5. Create the destination repositories and least-privilege pull/push credentials. ECR teams can
+6. Create the destination repositories and least-privilege pull/push credentials. ECR teams can
    use the concrete IAM policy in [ECR setup](docs/ecr-setup.md); OCI providers use their native
    project, robot-account, deploy-token, or workload-identity controls.
-6. Either add the parent/child setup in [GitLab CI](docs/gitlab-ci.md), or generate and commit
+7. Either add the parent/child setup in [GitLab CI](docs/gitlab-ci.md), or generate and commit
    `.github/workflows/container-images.yml` using [GitHub Actions](docs/github-actions.md). Keep
    full Git history available to the planning job.
-7. Run one `--ci --all` default-branch bootstrap to populate stable tags.
-8. Let ordinary merge-request and default-branch pipelines use `--ci` to calculate the minimal
+8. Run one `--ci --all` default-branch bootstrap to populate stable tags.
+9. Let ordinary merge-request and default-branch pipelines use `--ci` to calculate the minimal
    rebuild set.
-9. Make test and deployment jobs download `image-build-manifest.json` and use each target's
+10. Make test and deployment jobs download `image-build-manifest.json` and use each target's
    `immutable_reference`, rather than reconstructing a tag or pulling `main`.
-10. If container images have semantic releases, retain the default-branch manifest, calculate the
+11. If container images have semantic releases, retain the default-branch manifest, calculate the
     version after tests, and use `promote-manifest --expected-commit` to tag those exact digests.
-11. Use the JSON graph, plan, and manifest artifacts during review or incident diagnosis to explain
+12. Use the JSON graph, plan, and manifest artifacts during review or incident diagnosis to explain
     why each image was selected, what it consumed, and which bytes the commit produced.
 
 ## Command guide
@@ -1568,6 +1586,7 @@ job, deploy, or robot-account tokens over personal long-lived passwords.
 | --- | --- |
 | `platform version [--format json]` | Print the installed release without requiring a configured repository. `platform --version` is the shorter equivalent. |
 | `platform init [--discovery-root <path> ...] [--namespace <name>] [--builder <name>] [--registry-provider oci\|ecr] [--build-arg NAME=VALUE ...]` | Safely create `platform-images.toml` by inferring target groups and a minimal cascading repository policy. Applies strong unique mappings with a review audit and refuses to overwrite existing configuration. |
+| `platform reconcile [--check]` | Add safe external-base and repository-identity updates to an existing configuration, print the exact diff, and validate or roll back. `--check` detects drift without writing. |
 | `platform images list` | Inventory discovered image targets. |
 | `platform images show <name>` | Inspect one target's build file, output repository, aliases, dependencies, exact source-to-target bindings, and dependents. |
 | `platform images validate` | Gate commits before planning or building. |
@@ -1638,8 +1657,11 @@ references, `COPY`/`ADD`/`RUN --mount` inputs, public and explicitly external im
 non-image directories, and eight qualified references that deliberately remain warnings. The unit
 suite also runs `platform init` over a separate 320-image qualified-reference chain, proves that
 one inferred namespace cascades across all 320 targets, and confirms that only eight genuine remote
-basename exceptions are written. It mutates the full corpus to prove deterministic rejection of
-cycles, ambiguous aliases, missing managed images, and malformed syntax.
+basename exceptions are written. A second 320-image case starts from an existing uniform
+configuration, introduces eight remote-name exceptions, and proves that `platform reconcile`
+writes exactly those eight mappings and is byte-for-byte idempotent on its next run. The tests
+mutate the full corpus to prove deterministic rejection of cycles, ambiguous aliases, missing
+managed images, and malformed syntax.
 
 These are median results from 14 August 2026 using Python 3.12:
 
