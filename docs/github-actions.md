@@ -35,6 +35,14 @@ GitHub rejects an empty dynamic matrix. Empty waves therefore contain a sentinel
 successful no-op. If the runtime plan needs more layers than the checked-in workflow provides, the
 plan fails with a regeneration command rather than silently flattening dependencies.
 
+GitHub also limits a matrix to [256 generated
+jobs](https://docs.github.com/en/actions/reference/limits#existing-system-limits). The generator
+calculates a fast, safe parallel-width bound for the discovered DAG. When one wave can exceed 256
+targets, it creates enough parallel shards and `github-matrix` fills each with at most 256 entries.
+All shards in wave *n* depend on all shards in wave *n - 1*, preserving dependency ordering without
+serialising independent images. A 600-target independent wave therefore becomes three matrices of
+256, 256, and 88; a 600-target chain remains 600 one-entry waves rather than 1,800 jobs.
+
 For pull requests, the planner calculates the Git merge base of the checked-out head and
 `origin/<default-branch>`; it does not treat the moving base-branch tip as GitLab's semantically
 different diff-base variable. The generated checkout fetches complete history so that comparison
@@ -47,8 +55,9 @@ The workflow contains:
 - `validate`, which runs for pushes and all pull requests without registry credentials;
 - `plan`, which checks out full history, calculates `image-plan.json` once, emits matrices, and
   uploads the plan as a run-scoped artifact;
-- `image_layer_<n>`, a dynamic matrix in which each entry downloads and strictly validates the
-  authoritative plan before building one exact target and uploading its immutable result;
+- `image_layer_<n>`, or `image_layer_<n>_shard_<m>` for a wave wider than 256, a dynamic matrix in
+  which each entry downloads and strictly validates the authoritative plan before building one
+  exact target and uploading its immutable result;
 - `manifest`, which verifies all target results against the plan and uploads
   `image-build-manifest-<commit>`; and
 - `promote`, which runs only for a default-branch plan and only after manifest verification has

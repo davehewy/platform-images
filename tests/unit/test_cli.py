@@ -921,6 +921,24 @@ def test_render_plan_uses_persisted_json_and_rejects_graph_drift(
     )
     assert "image_base:" in capsys.readouterr().out
 
+    assert (
+        main(
+            [
+                "images",
+                "render-plan",
+                str(plan_path),
+                "--format",
+                "gitlab",
+                "--gitlab-max-jobs",
+                "3",
+            ],
+            cwd=root,
+            environment=environment,
+        )
+        == 1
+    )
+    assert "requires 4 jobs" in capsys.readouterr().err
+
     data = json.loads(plan_path.read_text(encoding="utf-8"))
     data["targets"][1]["dependencies"] = []
     plan_path.write_text(json.dumps(data), encoding="utf-8")

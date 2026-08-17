@@ -25,6 +25,7 @@ DOWNLOAD_ARTIFACT = "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a
 AWS_CREDENTIALS = (
     "aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c"  # v6.2.3
 )
+GITHUB_MATRIX_JOB_LIMIT = 256
 
 
 class _WorkflowDumper(yaml.SafeDumper):
@@ -57,9 +58,42 @@ def graph_layer_count(graph: ImageGraph) -> int:
     return max(depths.values(), default=0) + 1
 
 
-def render_github_outputs(plan: BuildPlan, max_layers: int) -> str:
+def graph_parallel_width_bound(graph: ImageGraph) -> int:
+    """Return a cheap, safe bound for parallel layers produced from affected plans.
+
+    A greedy vertex-disjoint path cover is deliberately used instead of an expensive maximum
+    antichain calculation. CI affected sets are downstream-closed, so each runtime layer remains
+    an antichain in the complete graph and can contain at most one target from each path. The
+    number of paths therefore safely bounds matrix width while staying linear in graph size.
+    """
+    matched_predecessors: set[str] = set()
+    matches = 0
+    for target in graph.topological_order():
+        for dependency in graph.direct_dependencies(target):
+            if dependency not in matched_predecessors:
+                matched_predecessors.add(dependency)
+                matches += 1
+                break
+    return len(graph.targets) - matches
+
+
+def _matrix_key(layer: int, shard: int, max_shards: int) -> str:
+    if max_shards == 1:
+        return f"layer_{layer}"
+    return f"layer_{layer}_shard_{shard}"
+
+
+def _layer_job_id(layer: int, shard: int, max_shards: int) -> str:
+    if max_shards == 1:
+        return f"image_layer_{layer}"
+    return f"image_layer_{layer}_shard_{shard}"
+
+
+def render_github_outputs(plan: BuildPlan, max_layers: int, max_shards: int = 1) -> str:
     if max_layers < 1:
         raise PlatformImagesError("--max-layers must be at least 1")
+    if max_shards < 1:
+        raise PlatformImagesError("--max-shards must be at least 1")
     layers = plan_layers(plan)
     if len(layers) > max_layers:
         raise PlatformImagesError(
@@ -69,11 +103,23 @@ def render_github_outputs(plan: BuildPlan, max_layers: int) -> str:
     lines = [f"mode={plan.mode.value}"]
     for index in range(max_layers):
         names = layers[index] if index < len(layers) else ()
-        # GitHub rejects an empty dynamic matrix, so a harmless sentinel keeps every static wave
-        # successful when a change plan has no work at that depth.
-        include = [{"target": name} for name in names] or [{"target": ""}]
-        value = json.dumps({"include": include}, separators=(",", ":"))
-        lines.append(f"layer_{index}={value}")
+        chunks = tuple(
+            names[offset : offset + GITHUB_MATRIX_JOB_LIMIT]
+            for offset in range(0, len(names), GITHUB_MATRIX_JOB_LIMIT)
+        )
+        if len(chunks) > max_shards:
+            raise PlatformImagesError(
+                f"plan layer {index + 1} requires {len(chunks)} GitHub matrix shards at "
+                f"{GITHUB_MATRIX_JOB_LIMIT} jobs each but the workflow provides {max_shards}; "
+                "regenerate it with 'platform images generate-workflow github'"
+            )
+        for shard in range(max_shards):
+            shard_names = chunks[shard] if shard < len(chunks) else ()
+            # GitHub rejects an empty dynamic matrix, so a harmless sentinel keeps every static
+            # shard successful when a change plan has no work in that slot.
+            include = [{"target": name} for name in shard_names] or [{"target": ""}]
+            value = json.dumps({"include": include}, separators=(",", ":"))
+            lines.append(f"{_matrix_key(index, shard, max_shards)}={value}")
     lines.append(f"has_targets={'true' if plan.targets else 'false'}")
     return "\n".join(lines)
 
@@ -195,6 +241,11 @@ def render_github_workflow(
     _valid_variable(aws_role_variable, "--aws-role-variable")
     _valid_variable(aws_region_variable, "--aws-region-variable")
     layer_count = graph_layer_count(graph)
+    parallel_width_bound = graph_parallel_width_bound(graph)
+    shard_count = max(
+        1,
+        (parallel_width_bound + GITHUB_MATRIX_JOB_LIMIT - 1) // GITHUB_MATRIX_JOB_LIMIT,
+    )
     registry_variable = config.registry.registry_environment_variable
     _valid_variable(registry_variable, "registry.registry_environment_variable")
     source_env: dict[str, str] = {
@@ -259,8 +310,11 @@ def render_github_workflow(
                 "mode": "${{ steps.matrix.outputs.mode }}",
                 "has_targets": "${{ steps.matrix.outputs.has_targets }}",
                 **{
-                    f"layer_{index}": f"${{{{ steps.matrix.outputs.layer_{index} }}}}"
+                    _matrix_key(index, shard, shard_count): (
+                        f"${{{{ steps.matrix.outputs.{_matrix_key(index, shard, shard_count)} }}}}"
+                    )
                     for index in range(layer_count)
+                    for shard in range(shard_count)
                 },
             },
             "steps": [
@@ -282,7 +336,7 @@ def render_github_workflow(
                     "id": "matrix",
                     "run": (
                         f"platform images github-matrix image-plan.json --max-layers "
-                        f'{layer_count} >> "$GITHUB_OUTPUT"'
+                        f'{layer_count} --max-shards {shard_count} >> "$GITHUB_OUTPUT"'
                     ),
                 },
                 {
@@ -298,76 +352,84 @@ def render_github_workflow(
         },
     }
 
-    previous = "plan"
+    previous_jobs: list[str] = []
     for index in range(layer_count):
-        job_id = f"image_layer_{index}"
-        jobs[job_id] = {
-            "name": f"Build layer {index + 1} / ${{{{ matrix.target || 'no changes' }}}}",
-            "needs": ["plan"] if index == 0 else ["plan", previous],
-            "runs-on": runner,
-            "timeout-minutes": 45,
-            "permissions": permissions,
-            "env": {**source_env, **credential_env},
-            "strategy": {
-                "fail-fast": False,
-                "matrix": f"${{{{ fromJSON(needs.plan.outputs.layer_{index}) }}}}",
-            },
-            "steps": [
-                {
-                    "name": "No image changes in this layer",
-                    "if": "matrix.target == ''",
-                    "run": 'echo "No affected images in this dependency layer."',
+        current_jobs: list[str] = []
+        for shard in range(shard_count):
+            job_id = _layer_job_id(index, shard, shard_count)
+            current_jobs.append(job_id)
+            matrix_key = _matrix_key(index, shard, shard_count)
+            shard_label = f", shard {shard + 1}/{shard_count}" if shard_count > 1 else ""
+            jobs[job_id] = {
+                "name": (
+                    f"Build layer {index + 1}{shard_label} / "
+                    "${{ matrix.target || 'no changes' }}"
+                ),
+                "needs": ["plan", *previous_jobs],
+                "runs-on": runner,
+                "timeout-minutes": 45,
+                "permissions": permissions,
+                "env": {**source_env, **credential_env},
+                "strategy": {
+                    "fail-fast": False,
+                    "matrix": f"${{{{ fromJSON(needs.plan.outputs.{matrix_key}) }}}}",
                 },
-                {**_checkout_step(), "if": "matrix.target != ''"},
-                {**_install_step(), "if": "matrix.target != ''"},
-                *[{**step, "if": "matrix.target != ''"} for step in auth_steps],
-                *[
-                    {**step, "if": "matrix.target != ''"}
-                    for step in _runtime_steps(builder, registry_transport)
-                ],
-                {**_artifact_download_step(), "if": "matrix.target != ''"},
-                {
-                    "name": "Authenticate registry transport",
-                    "if": "matrix.target != ''",
-                    "run": (
-                        "platform images registry-login --registry-transport "
-                        f"{registry_transport.value}"
-                    ),
-                },
-                {
-                    "name": "Build and push exact planned target",
-                    "if": "matrix.target != ''",
-                    "run": (
-                        "mkdir -p image-results\n"
-                        "platform images build-plan-target .platform-images/image-plan.json "
-                        f'"${{{{ matrix.target }}}}" --builder {builder.value} '
-                        f"--registry-transport {registry_transport.value} "
-                        '--result-file "image-results/${{ matrix.target }}.json"'
-                    ),
-                },
-                {
-                    "name": "Upload immutable image result",
-                    "if": "matrix.target != ''",
-                    "uses": UPLOAD_ARTIFACT,
-                    "with": {
-                        "name": (
-                            "image-result-${{ github.run_id }}-${{ github.run_attempt }}-"
-                            "${{ matrix.target }}"
-                        ),
-                        "path": "image-results/${{ matrix.target }}.json",
-                        "if-no-files-found": "error",
+                "steps": [
+                    {
+                        "name": "No image changes in this layer",
+                        "if": "matrix.target == ''",
+                        "run": 'echo "No affected images in this dependency layer."',
                     },
-                },
-            ],
-        }
-        previous = job_id
+                    {**_checkout_step(), "if": "matrix.target != ''"},
+                    {**_install_step(), "if": "matrix.target != ''"},
+                    *[{**step, "if": "matrix.target != ''"} for step in auth_steps],
+                    *[
+                        {**step, "if": "matrix.target != ''"}
+                        for step in _runtime_steps(builder, registry_transport)
+                    ],
+                    {**_artifact_download_step(), "if": "matrix.target != ''"},
+                    {
+                        "name": "Authenticate registry transport",
+                        "if": "matrix.target != ''",
+                        "run": (
+                            "platform images registry-login --registry-transport "
+                            f"{registry_transport.value}"
+                        ),
+                    },
+                    {
+                        "name": "Build and push exact planned target",
+                        "if": "matrix.target != ''",
+                        "run": (
+                            "mkdir -p image-results\n"
+                            "platform images build-plan-target .platform-images/image-plan.json "
+                            f'"${{{{ matrix.target }}}}" --builder {builder.value} '
+                            f"--registry-transport {registry_transport.value} "
+                            '--result-file "image-results/${{ matrix.target }}.json"'
+                        ),
+                    },
+                    {
+                        "name": "Upload immutable image result",
+                        "if": "matrix.target != ''",
+                        "uses": UPLOAD_ARTIFACT,
+                        "with": {
+                            "name": (
+                                "image-result-${{ github.run_id }}-${{ github.run_attempt }}-"
+                                "${{ matrix.target }}"
+                            ),
+                            "path": "image-results/${{ matrix.target }}.json",
+                            "if-no-files-found": "error",
+                        },
+                    },
+                ],
+            }
+        previous_jobs = current_jobs
 
     jobs["manifest"] = {
         "name": "Publish commit image manifest",
-        "needs": ["plan", previous],
+        "needs": ["plan", *previous_jobs],
         "if": (
             "!cancelled() && needs.plan.result == 'success' && "
-            f"needs.{previous}.result == 'success'"
+            + " && ".join(f"needs.{job_id}.result == 'success'" for job_id in previous_jobs)
         ),
         "runs-on": runner,
         "timeout-minutes": 10,

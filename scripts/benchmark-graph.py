@@ -166,7 +166,13 @@ def run_benchmark(image_count: int, iterations: int, scenario: str = "imperfect"
                 pipeline_id="12345",
             )
             plan_json = render_plan_json(plan)
-            gitlab = render_gitlab(plan, config, "registry.example.com")
+            # Benchmark rendering independently of the GitLab tier selected by a real project.
+            gitlab = render_gitlab(
+                plan,
+                config,
+                "registry.example.com",
+                max_jobs=len(plan.targets) + 2,
+            )
             github = render_github_workflow(graph, config)
             if (
                 len(plan.targets) != image_count

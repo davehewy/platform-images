@@ -26,6 +26,22 @@ large `needs` fan-in, so an affected graph wider than GitLab's per-job `needs` l
 An empty plan still publishes a manifest with an empty `images` object because GitLab requires an
 executable child pipeline and downstream automation needs an explicit answer.
 
+Before emitting YAML, the renderer counts one job per affected image, the manifest job, and the
+default-branch promotion job when present. `--gitlab-max-jobs` defaults to 500, matching the current
+[GitLab.com Free per-pipeline limit](https://docs.gitlab.com/user/gitlab_com/#gitlab-cicd); raise it
+only to the documented allowance for the project's tier or self-managed instance:
+
+```bash
+platform images render-plan image-plan.json --format gitlab \
+  --gitlab-max-jobs 1500 > generated-images.yml
+```
+
+The locally included template may add scan, test, or deployment jobs that the dynamic renderer
+cannot see, and those jobs consume the same limit. Leave explicit headroom for them. Exceeding the
+budget fails during generation with the exact required count; the controller does not hide the
+problem by splitting a connected DAG into child pipelines whose cross-pipeline artifact and
+dependency semantics would be weaker.
+
 Merge-request tags are unique `ci-<pipeline>-<commit>` values and are never promoted. Default-branch
 tags are immutable `sha-<full-commit>` values. A single `promote_main` job runs in the final stage;
 only after builds, manifest verification, and any user-defined `consume` jobs succeed does it retag
