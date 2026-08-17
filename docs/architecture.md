@@ -22,8 +22,8 @@ package makes repository conventions explicit and testable.
    and marks later multi-parent occurrences as already shown, keeping output `O(V + E)`.
 4. **Validation** rejects unsafe names and paths, ambiguous build files, missing discovery roots,
    unresolved/internal references, unapproved short external names, stage-name collisions, and
-   complete deterministic cycle paths. Strong qualified near-matches remain external but produce
-   an actionable mapping warning rather than a guessed graph edge.
+   complete deterministic cycle paths. After initialization, unmapped qualified near-matches
+   remain external and are consolidated into one actionable warning per repository.
 5. **Changes** parses NUL-delimited, rename-aware Git output and maps image paths or global inputs
    to directly changed targets. Controller, lock, configuration, and pipeline paths are mandatory
    global inputs in code, so a configuration edit cannot disable its own rebuild. Deleted targets
@@ -103,6 +103,10 @@ and `FROM alpine` as short registry names. The controller resolves a discovered 
 accepts `scratch`, and accepts only the additional external short names explicitly listed in
 `dockerfile.allowed_short_external_images`. All other unqualified names fail validation. A
 registry-qualified reference resolves locally when its final repository component exactly matches
-a unique logical target, canonical published repository, or alias. Strong but inexact matches stay
-external and produce a warning; explicit `identity.external_repositories` entries suppress
-intentional collisions.
+a unique logical target, canonical published repository, or alias. During initialization only, a
+two-phase repository reconciler may promote a unique separator-normalized or strong isolated
+near-match into exact generated configuration. It selects a dominant repository namespace as the
+cascading default and emits per-target configuration only for actual basename exceptions or legacy
+aliases. Every later graph and build resolves the persisted exact identities; it does not perform
+fuzzy runtime binding. Unresolved occurrences are grouped by repository into one warning, and
+explicit `identity.external_repositories` entries suppress intentional collisions.

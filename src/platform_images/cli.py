@@ -114,7 +114,8 @@ Run 'platform COMMAND --help' for command-specific help.
         description=(
             "Create platform-images.toml without overwriting an existing configuration. By "
             "default, target groups are inferred from existing Dockerfile and Containerfile "
-            "locations."
+            "locations, qualified repositories are paired with likely local targets, and the "
+            "smallest cascading repository policy is written with a review audit."
         ),
         epilog="""\
 examples:
@@ -139,7 +140,10 @@ examples:
     )
     init.add_argument(
         "--namespace",
-        help="registry repository namespace (default: a normalized repository directory name)",
+        help=(
+            "global repository namespace; cascades to every target and overrides inference "
+            "(default: infer from local references, then repository directory name)"
+        ),
     )
     init.add_argument(
         "--builder",
@@ -498,6 +502,23 @@ def _run_init(arguments: argparse.Namespace, cwd: Path | None) -> int:
         print(
             "They resolve automatically; build outputs use registry namespace: "
             f"{config.registry.namespace}"
+        )
+    if result.repository_inferences:
+        guess_word = "mapping" if len(result.repository_inferences) == 1 else "mappings"
+        print(
+            f"Review warning: init applied {len(result.repository_inferences)} inferred repository "
+            f"{guess_word}:"
+        )
+        for inference in result.repository_inferences:
+            reference_word = "reference" if inference.reference_count == 1 else "references"
+            print(
+                f"  - {inference.source_repository} -> {inference.target} "
+                f"({inference.confidence}, {inference.reference_count} {reference_word}; "
+                f"{inference.action})"
+            )
+        print(
+            "The generated global namespace cascades to every target; only naming exceptions "
+            "were written under [images]."
         )
     if result.allowed_short_external_images:
         print("Allowed short external images inferred from build files:")

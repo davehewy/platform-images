@@ -293,9 +293,7 @@ def test_init_infers_published_repository_and_graphs_qualified_reference(
     assert "nexus.example.com/gitlab/ubuntu-base-24-04:latest -> ubuntu-base-24-04" in show_output
 
 
-def test_init_warns_when_qualified_source_probably_uses_a_different_local_name(
-    tmp_path: Path, capsys
-) -> None:
+def test_init_applies_and_reports_strong_repository_name_inference(tmp_path: Path, capsys) -> None:
     root = tmp_path / "repository"
     target_root = root / "containers"
     base = target_root / "ubuntu24-04-base"
@@ -310,20 +308,59 @@ def test_init_warns_when_qualified_source_probably_uses_a_different_local_name(
 
     assert main(["init"], cwd=root, environment={}) == 0
 
+    config = RepositoryConfig.load(root)
+    assert config.registry.namespace == "gitlab-runner"
+    assert config.image_repository("ubuntu24-04-base") == "gitlab-runner/ubuntu24-base"
+    report = validate_repository(config)
+    assert report.valid
+    assert not report.warnings
+    assert report.graph.direct_dependencies("application") == ("ubuntu24-04-base",)
+
     output = capsys.readouterr().out
     assert "Initial validation passed (2 image targets)." in output
-    assert "Warnings: 1" in output
-    assert "[probable-local-reference]" in output
-    assert '[images."ubuntu24-04-base"]' in output
-    assert 'aliases = ["nexus.example.com/gitlab-runner/ubuntu24-base"]' in output
+    assert "Review warning: init applied 1 inferred repository mapping:" in output
+    assert "gitlab-runner/ubuntu24-base -> ubuntu24-04-base" in output
+    assert "strong-similarity, 1 reference; canonical repository override" in output
+    assert "global namespace cascades to every target" in output
 
     assert main(["images", "validate"], cwd=root, environment={}) == 0
     validation_output = capsys.readouterr().out
-    assert "Warnings: 1" in validation_output
-    assert (
-        'external_repositories = ["nexus.example.com/gitlab-runner/ubuntu24-base"]'
-        in validation_output
+    assert "Warnings:" not in validation_output
+
+
+def test_init_collapses_repeated_separator_variants_into_one_cascaded_mapping(
+    tmp_path: Path, capsys
+) -> None:
+    root = tmp_path / "repository"
+    targets = root / "containers"
+    base = targets / "ubuntu24-04-base"
+    base.mkdir(parents=True)
+    (base / "Dockerfile").write_text("FROM ubuntu:24.04\n", encoding="utf-8")
+    for index in range(27):
+        consumer = targets / f"consumer-{index:02d}"
+        consumer.mkdir(parents=True)
+        (consumer / "Dockerfile").write_text(
+            "FROM nexus.example.com:8088/risk-repo/ubuntu-24-04-base:latest\n",
+            encoding="utf-8",
+        )
+
+    assert main(["init"], cwd=root, environment={}) == 0
+
+    config = RepositoryConfig.load(root)
+    assert config.registry.namespace == "risk-repo"
+    assert tuple(config.images) == ("ubuntu24-04-base",)
+    assert config.image_repository("ubuntu24-04-base") == ("risk-repo/ubuntu-24-04-base")
+    assert config.image_repository("consumer-00") == "risk-repo/consumer-00"
+    report = validate_repository(config)
+    assert report.valid
+    assert not report.warnings
+    assert all(
+        report.graph.direct_dependencies(f"consumer-{index:02d}") == ("ubuntu24-04-base",)
+        for index in range(27)
     )
+    output = capsys.readouterr().out
+    assert "Review warning: init applied 1 inferred repository mapping:" in output
+    assert "separator-normalized, 27 references; canonical repository override" in output
 
 
 def test_init_explicit_namespace_keeps_one_uniform_output_policy(tmp_path: Path, capsys) -> None:
@@ -347,6 +384,136 @@ def test_init_explicit_namespace_keeps_one_uniform_output_policy(tmp_path: Path,
     assert report.valid
     assert report.graph.direct_dependencies("application") == ("base",)
     assert "Output registry namespace inferred" not in capsys.readouterr().out
+
+
+def test_init_explicit_namespace_cascades_and_keeps_legacy_near_match_as_alias(
+    tmp_path: Path, capsys
+) -> None:
+    root = tmp_path / "repository"
+    base = root / "containers" / "ubuntu24-04-base"
+    application = root / "containers" / "application"
+    base.mkdir(parents=True)
+    application.mkdir(parents=True)
+    (base / "Dockerfile").write_text("FROM ubuntu:24.04\n", encoding="utf-8")
+    (application / "Dockerfile").write_text(
+        "FROM nexus.example.com/legacy/ubuntu24-base:latest\n",
+        encoding="utf-8",
+    )
+
+    assert main(["init", "--namespace", "owned/team"], cwd=root, environment={}) == 0
+
+    config = RepositoryConfig.load(root)
+    assert config.registry.namespace == "owned/team"
+    assert config.image_repository("ubuntu24-04-base") == "owned/team/ubuntu24-04-base"
+    assert config.image_aliases("ubuntu24-04-base") == ("legacy/ubuntu24-base",)
+    report = validate_repository(config)
+    assert report.valid
+    assert not report.warnings
+    assert report.graph.direct_dependencies("application") == ("ubuntu24-04-base",)
+    output = capsys.readouterr().out
+    assert "legacy/ubuntu24-base -> ubuntu24-04-base" in output
+    assert "dependency alias" in output
+
+
+def test_init_does_not_guess_through_separator_normalization_collision(
+    tmp_path: Path, capsys
+) -> None:
+    root = tmp_path / "repository"
+    targets = root / "containers"
+    for name in ("ubuntu24-04-base", "ubuntu-2404-base"):
+        directory = targets / name
+        directory.mkdir(parents=True)
+        (directory / "Dockerfile").write_text("FROM ubuntu:24.04\n", encoding="utf-8")
+    consumer = targets / "consumer"
+    consumer.mkdir(parents=True)
+    (consumer / "Dockerfile").write_text(
+        "FROM nexus.example.com/risk-repo/ubuntu-24-04-base:latest\n",
+        encoding="utf-8",
+    )
+
+    assert main(["init"], cwd=root, environment={}) == 0
+
+    config = RepositoryConfig.load(root)
+    assert not config.images
+    report = validate_repository(config)
+    warnings = [issue for issue in report.warnings if issue.code == "probable-local-reference"]
+    assert len(warnings) == 1
+    assert "multiple local targets" in warnings[0].message
+    output = capsys.readouterr().out
+    assert "Review warning: init applied" not in output
+    assert "Warnings: 1" in output
+
+
+def test_init_uses_dominant_repository_namespace_as_the_global_cascade(
+    tmp_path: Path, capsys
+) -> None:
+    root = tmp_path / "repository"
+    targets = root / "containers"
+    base = targets / "base"
+    base.mkdir(parents=True)
+    (base / "Dockerfile").write_text("FROM alpine\n", encoding="utf-8")
+    for index in range(4):
+        consumer = targets / f"current-{index}"
+        consumer.mkdir(parents=True)
+        (consumer / "Dockerfile").write_text(
+            "FROM nexus.example.com/risk-repo/base:latest\n",
+            encoding="utf-8",
+        )
+    legacy = targets / "legacy-consumer"
+    legacy.mkdir(parents=True)
+    (legacy / "Dockerfile").write_text(
+        "FROM old.example.com/retired/base:latest\n",
+        encoding="utf-8",
+    )
+
+    assert main(["init"], cwd=root, environment={}) == 0
+
+    config = RepositoryConfig.load(root)
+    assert config.registry.namespace == "risk-repo"
+    assert not config.images
+    report = validate_repository(config)
+    assert report.valid
+    assert not report.warnings
+    output = capsys.readouterr().out
+    assert "Output registry namespace inferred from qualified local references: risk-repo" in output
+
+
+def test_init_combines_canonical_and_legacy_spellings_in_one_image_exception(
+    tmp_path: Path, capsys
+) -> None:
+    root = tmp_path / "repository"
+    targets = root / "containers"
+    base = targets / "ubuntu24-04-base"
+    base.mkdir(parents=True)
+    (base / "Dockerfile").write_text("FROM ubuntu:24.04\n", encoding="utf-8")
+    for index in range(3):
+        consumer = targets / f"current-{index}"
+        consumer.mkdir(parents=True)
+        (consumer / "Dockerfile").write_text(
+            "FROM nexus.example.com/risk-repo/ubuntu-24-04-base:latest\n",
+            encoding="utf-8",
+        )
+    legacy = targets / "legacy"
+    legacy.mkdir(parents=True)
+    (legacy / "Dockerfile").write_text(
+        "FROM old.example.com/retired/ubuntu24-base:latest\n",
+        encoding="utf-8",
+    )
+
+    assert main(["init"], cwd=root, environment={}) == 0
+
+    config = RepositoryConfig.load(root)
+    assert config.registry.namespace == "risk-repo"
+    assert tuple(config.images) == ("ubuntu24-04-base",)
+    assert config.image_repository("ubuntu24-04-base") == "risk-repo/ubuntu-24-04-base"
+    assert config.image_aliases("ubuntu24-04-base") == ("retired/ubuntu24-base",)
+    report = validate_repository(config)
+    assert report.valid
+    assert not report.warnings
+    assert report.graph.direct_dependencies("legacy") == ("ubuntu24-04-base",)
+    output = capsys.readouterr().out
+    assert "canonical repository override" in output
+    assert "dependency alias" in output
 
 
 def test_init_accepts_multiple_source_registries_without_per_image_inventory(

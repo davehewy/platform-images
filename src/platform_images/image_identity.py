@@ -21,13 +21,36 @@ def registry_relative_repository(reference: str) -> str:
     return remainder if registry_qualified else repository
 
 
+def compact_image_name(value: str) -> str:
+    """Return the separator-insensitive key used for strong image-name comparisons."""
+    return "".join(character for character in value.casefold() if character.isalnum())
+
+
+def probable_target_matches(
+    reference: str,
+    target_names: Iterable[str],
+) -> tuple[tuple[str, float], ...]:
+    """Rank deterministic local-name candidates for a qualified image reference."""
+    basename = repository_name(reference).rsplit("/", 1)[-1]
+    compact_basename = compact_image_name(basename)
+    scored: list[tuple[float, str]] = []
+    for target in target_names:
+        score = SequenceMatcher(None, basename, target).ratio()
+        if compact_basename == compact_image_name(target):
+            score = 1.0
+        if score >= 0.75:
+            scored.append((score, target))
+    ordered = sorted(scored, key=lambda item: (-item[0], item[1]))
+    return tuple((target, score) for score, target in ordered)
+
+
 @dataclass(frozen=True)
 class ImageIdentityResolver:
     identities: Mapping[str, frozenset[str]]
     managed_prefixes: frozenset[str]
     target_names: frozenset[str]
     external_repositories: frozenset[str]
-    _probable_matches_cache: dict[str, tuple[str, ...]] = field(
+    _probable_matches_cache: dict[str, tuple[tuple[str, float], ...]] = field(
         default_factory=dict,
         init=False,
         compare=False,
@@ -59,24 +82,25 @@ class ImageIdentityResolver:
             return ()
         cached = self._probable_matches_cache.get(repository)
         if cached is not None:
-            return cached
-        basename = repository.rsplit("/", 1)[-1]
-        compact_basename = "".join(character for character in basename if character.isalnum())
-        scored: list[tuple[float, str]] = []
-        for target in self.target_names:
-            compact_target = "".join(character for character in target if character.isalnum())
-            score = SequenceMatcher(None, basename, target).ratio()
-            if compact_basename == compact_target:
-                score = 1.0
-            if score >= 0.75:
-                scored.append((score, target))
-        ordered = sorted(scored, key=lambda item: (-item[0], item[1]))
-        result = tuple(target for _score, target in ordered)
+            return tuple(target for target, _score in cached)
+        result = probable_target_matches(repository, self.target_names)
         # Validation commonly sees the same public base image in hundreds of Dockerfiles. The
         # resolver is scoped to one immutable target set, so memoizing by normalized repository
         # avoids repeating an O(targets) fuzzy scan without changing any matching semantics.
         self._probable_matches_cache[repository] = result
-        return result
+        return tuple(target for target, _score in result)
+
+    def probable_local_matches(self, reference: str) -> tuple[tuple[str, float], ...]:
+        """Return probable local targets with their deterministic similarity scores."""
+        repository = repository_name(reference)
+        if "/" not in repository or self.is_explicit_external(repository):
+            return ()
+        cached = self._probable_matches_cache.get(repository)
+        if cached is None:
+            # Populate the shared cache through the public target-only view.
+            self.probable_local_targets(repository)
+            cached = self._probable_matches_cache.get(repository, ())
+        return cached
 
     def is_managed(self, reference: str) -> bool:
         repository = repository_name(reference)
