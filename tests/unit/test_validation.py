@@ -187,7 +187,7 @@ def test_qualified_reference_with_exact_basename_is_local_without_image_configur
     assert report.graph.direct_dependencies("application") == ("ubuntu24-04-base",)
 
 
-def test_qualified_near_match_warns_with_manual_mapping_configuration(
+def test_qualified_near_match_warns_once_with_a_recommended_mapping(
     repository_factory: Callable[[dict[str, str]], Path],
 ) -> None:
     source = "nexus.example.com/gitlab-runner/ubuntu24-base:latest"
@@ -204,11 +204,9 @@ def test_qualified_near_match_warns_with_manual_mapping_configuration(
     issue = next(issue for issue in report.warnings if issue.code == "probable-local-reference")
     assert "ubuntu24-04-base" in issue.message
     assert '[images."ubuntu24-04-base"]' in (issue.hint or "")
-    assert 'aliases = ["nexus.example.com/gitlab-runner/ubuntu24-base"]' in (issue.hint or "")
-    assert 'repository = "gitlab-runner/ubuntu24-base"' in (issue.hint or "")
-    assert 'external_repositories = ["nexus.example.com/gitlab-runner/ubuntu24-base"]' in (
-        issue.hint or ""
-    )
+    assert 'aliases = ["gitlab-runner/ubuntu24-base"]' in (issue.hint or "")
+    assert "recommended single change" in (issue.hint or "")
+    assert "repository =" not in (issue.hint or "")
     assert report.graph.direct_dependencies("application") == ()
 
     config_path = root / "platform-images.toml"
@@ -222,6 +220,22 @@ def test_qualified_near_match_warns_with_manual_mapping_configuration(
     assert mapped_report.valid
     assert not mapped_report.warnings
     assert mapped_report.graph.direct_dependencies("application") == ("ubuntu24-04-base",)
+
+
+def test_repeated_probable_repository_is_grouped_into_one_warning(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    source = "nexus.example.com/risk-repo/ubuntu-24-04-base:latest"
+    images = {"ubuntu24-04-base": "FROM alpine:3.22\n"}
+    images.update({f"consumer-{index:02d}": f"FROM {source}\n" for index in range(12)})
+    root = repository_factory(images)
+
+    report = validate_repository(RepositoryConfig.load(root))
+
+    warnings = [issue for issue in report.warnings if issue.code == "probable-local-reference"]
+    assert len(warnings) == 1
+    assert "12 references across 12 build files" in warnings[0].message
+    assert "recommended single change for all 12 references" in (warnings[0].hint or "")
 
 
 def test_explicit_external_repository_prevents_automatic_local_edge(
@@ -466,7 +480,8 @@ def test_internal_typo_has_hint(repository_factory: Callable[[dict[str, str]], P
     report = validate_repository(RepositoryConfig.load(root))
     issue = next(issue for issue in report.errors if issue.code == "missing-internal-target")
     assert '[images."base"]' in (issue.hint or "")
-    assert 'aliases = ["registry.example/platform-images/bsae"]' in (issue.hint or "")
+    assert "correct the source to 'platform-images/base'" in (issue.hint or "")
+    assert 'aliases = ["platform-images/bsae"]' in (issue.hint or "")
 
 
 def test_unqualified_local_typo_is_rejected_with_hint(

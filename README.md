@@ -226,9 +226,12 @@ Directories beneath those roots that do not contain either build filename are or
 directories and are ignored.
 It also adds inferred short external bases such as `alpine` to the starter allowlist. Exact
 qualified basenames form local edges automatically; when those references share one repository
-path, `init` adopts it as the single output namespace rather than writing per-image entries. Strong
-near-matches are printed with an exact manual mapping instead of being guessed. It never moves an
-image, assumes a fixed root name, or overwrites an existing configuration.
+path, `init` adopts it as the cascading output namespace rather than writing per-image entries.
+Separator-only variants and strong unique near-matches are paired automatically. `init` writes the
+smallest exact configuration needed to make those guesses reproducible, groups repeated references
+to the same repository, and prints one review warning per inferred mapping. Genuine collisions stay
+unmapped. It never moves an image, assumes a fixed root name, or overwrites an existing
+configuration.
 
 If auto-discovery is intentionally broader than the ownership areas you want, name each existing
 target parent directory explicitly. The directories can be anywhere beneath the repository:
@@ -331,7 +334,9 @@ FROM nexus.example.com/gitlab-runner/ubuntu24-04-base:latest
 
 The same target can be referenced from several private or public registry hosts without listing
 those hosts in configuration. An unmatched qualified source remains external. The tool only uses
-an exact final-component match automatically; it never makes a fuzzy graph edge.
+an exact final-component match during ordinary graph construction; it never makes a fuzzy graph
+edge at build time. `platform init` may make a reviewed best guess, but records that decision as an
+exact repository or alias mapping before validating the graph.
 
 The same rule applies when the reference is assembled through a build argument:
 
@@ -386,10 +391,58 @@ application
 
 ### When the remote and local names differ
 
-The tool does not guess when a source resembles a local target but its final name differs. `init`
-and `images validate` print a `probable-local-reference` warning with the source file, line, likely
-target, and exact configuration choices. For example, remote `ubuntu24-base` may plausibly mean
-local target `ubuntu24-04-base`, but it stays external until the repository owner confirms it.
+`platform init` optimizes for adopting an existing repository with minimal operator work. It first
+removes the registry host, port, tag, and digest, then compares the registry-relative repository
+with all discovered logical targets. It automatically accepts:
+
+- an exact basename;
+- a unique separator-insensitive basename, such as remote `ubuntu-24-04-base` and local
+  `ubuntu24-04-base`; and
+- a strong unique similarity match when the next-best candidate is clearly worse.
+
+The most strongly represented repository path becomes the global `registry.namespace`. That value
+cascades to every discovered target. `init` writes an `images.<target>.repository` only when a
+target's actual remote name differs from `<registry.namespace>/<logical-target>`, and writes an
+alias only for an additional or legacy input spelling. Twenty-seven consumers of one remote base
+therefore produce one mapping, not twenty-seven warnings.
+
+For example, these repeated sources:
+
+```dockerfile
+FROM nexus.example.com:8088/risk-repo/ubuntu-24-04-base:latest
+```
+
+paired with local directory `ubuntu24-04-base` generate only:
+
+```toml
+[registry]
+namespace = "risk-repo"
+
+[images."ubuntu24-04-base"]
+repository = "risk-repo/ubuntu-24-04-base"
+```
+
+The registry endpoint remains environment configuration:
+
+```bash
+export PLATFORM_IMAGES_REGISTRY=nexus.example.com:8088
+```
+
+`init` also prints a compact audit record:
+
+```text
+Review warning: init applied 1 inferred repository mapping:
+  - risk-repo/ubuntu-24-04-base -> ubuntu24-04-base
+    (separator-normalized, 27 references; canonical repository override)
+```
+
+The generated mapping is exact from then on: graphing and building do not repeatedly guess. If
+separator normalization maps to multiple local targets, or two candidates are too close, `init`
+does not choose. Validation groups all occurrences of that remote repository into one warning and
+recommends one primary configuration change for the whole repository rather than presenting three
+equal-weight choices for every Dockerfile.
+
+For an already configured repository, an unresolved near-match looks like:
 
 ```text
 $ platform images validate
@@ -398,12 +451,12 @@ Validation passed (2 image targets).
 Warnings: 1
 
 containers/application/Dockerfile:1
-  [probable-local-reference] qualified image reference resembles local target
-  'ubuntu24-04-base' but is currently external:
-  nexus.example.com/gitlab-runner/ubuntu24-base:latest
+  [probable-local-reference] qualified image repository resembles local target
+  'ubuntu24-04-base' but is currently external (27 references across 27 build files):
+  nexus.example.com/gitlab-runner/ubuntu24-base
 ```
 
-Use an alias when the spelling is only an accepted dependency input:
+When that spelling is only an accepted dependency input, use the single recommended alias:
 
 ```toml
 [images."ubuntu24-04-base"]
@@ -412,8 +465,9 @@ aliases = [
 ]
 ```
 
-Use `repository` instead when that different name is also where the locally built image must be
-published. The value is registry-relative and tagless:
+Use `repository` when that different name is also where the locally built image must be published.
+`init` selects this automatically when the source belongs to its inferred output namespace. The
+value is registry-relative and tagless:
 
 ```toml
 [images."ubuntu24-04-base"]
@@ -454,9 +508,9 @@ repository = "gitlab/ubuntu-base-24-04"
 ```
 
 `FROM nexus.example.com/gitlab/ubuntu-base-24-04:latest` then creates an edge to `foundation`.
-Because that relationship cannot be inferred safely from two different names, configure it
-explicitly; automatic `init` inference only acts when the repository's final component exactly
-matches one discovered logical target.
+An unrelated rename such as `foundation` to `ubuntu-base-24-04` has no defensible name similarity,
+so configure it explicitly. Clever inference is reserved for unique evidence; it does not turn an
+arbitrary remote repository into a local target.
 
 ## The checked-in example
 
@@ -1184,14 +1238,14 @@ platform init
 
 Use this when adopting the tool in an existing repository: it derives discovery roots from the
 locations of existing build files, infers unqualified external base names, consolidates a common
-qualified local-image path into one output namespace, and validates the result. Pass repeatable
+qualified local-image path into one cascading output namespace, applies unique high-confidence
+remote-to-local repository matches, and validates the resulting exact graph. Pass repeatable
 `--discovery-root` options when you want to declare ownership areas explicitly, `--namespace` when
 the registry hierarchy differs from the repository name, and `--builder` when Docker is not the
 right default. The command refuses to replace `platform-images.toml`; configuration changes after
 initialization remain ordinary reviewed source changes. Review the short external image allowlist
-printed by `init` before committing it. Review probable-local warnings and either add the suggested
-manual mapping or acknowledge an intentional external repository; inexact relationships are never
-added automatically.
+and the compact inferred-repository audit printed by `init` before committing it. Automatic guesses
+are persisted as exact configuration; genuine ambiguities remain grouped review warnings.
 
 This repository's complete configuration is:
 
@@ -1290,6 +1344,19 @@ Dockerfile reference. A qualified reference also resolves automatically when its
 component exactly matches the logical target; registry hostnames and intermediate paths do not
 need to be registered.
 
+Repository configuration cascades from broad policy to narrow exceptions:
+
+1. An explicit `platform init --namespace` is the global output prefix and always wins.
+2. Without that option, `init` selects the dominant qualified local-reference path as the global
+   `registry.namespace` when the evidence has one winner.
+3. Every target then publishes to `<registry.namespace>/<logical-target>` without an image table.
+4. `images.<target>.repository` overrides only a canonical remote-name exception.
+5. `images.<target>.aliases` adds only legacy or additional dependency spellings and never changes
+   the output destination.
+
+This keeps a 300-image repository on one global setting when its naming is uniform while still
+allowing a handful of real exceptions. Repeated consumers never require repeated configuration.
+
 | Setting | What it controls | When and why to change it |
 | --- | --- | --- |
 | `images.<target>.repository` | Exceptional registry-relative output repository and canonical qualified dependency identity. It must not contain a registry hostname, tag, or digest. | Use only when this target's pushed name differs from the global `<registry.namespace>/<target>` convention, including when the remote basename differs from the logical target. |
@@ -1301,7 +1368,8 @@ The registry host remains an environment or CI concern. For example, configure
 `PLATFORM_IMAGES_REGISTRY=nexus.example.com`; do not put `nexus.example.com` or `:latest` in the
 `repository` setting. Validation rejects stale target entries, tagged aliases, and identities
 claimed by more than one target. `platform init` consolidates one common qualified-reference path
-into `registry.namespace`; explicit `--namespace` always wins and keeps output naming uniform.
+into `registry.namespace`, selects a clearly dominant path during migrations, and writes only
+remote-basename exceptions below `[images]`; explicit `--namespace` always wins.
 
 ### Tag settings
 
@@ -1446,11 +1514,12 @@ job, deploy, or robot-account tokens over personal long-lived passwords.
 1. Configure `discovery.roots` around the repository's existing ownership areas and put each owned
    target in a direct child directory of one of them. Keep exactly one `Dockerfile` or
    `Containerfile` per target and keep ordinary context files alongside it.
-2. Prefer logical references such as `FROM base`. Where established Dockerfiles must keep qualified
-   references, configure each target's canonical `images.<target>.repository` and any legacy
-   aliases.
-3. Configure the registry namespace, stable tag, approved short external images, per-target
-   repository overrides, and genuine shared inputs in `platform-images.toml`.
+2. Run `platform init` and review its repository-inference audit. Prefer logical references such as
+   `FROM base` for new files; established qualified references can remain unchanged when the
+   inferred mappings are correct.
+3. Configure broad policy once—the registry namespace, stable tag, approved short external images,
+   and genuine shared inputs. Keep per-target repository overrides and aliases for actual naming
+   exceptions only.
 4. Choose `build.backend` and `registry.transport`, then run `platform images validate`, `graph`,
    and `build <leaf> --dry-run` locally. Review the inferred graph with image owners.
 5. Create the destination repositories and least-privilege pull/push credentials. ECR teams can
@@ -1474,7 +1543,7 @@ job, deploy, or robot-account tokens over personal long-lived passwords.
 | Command | Typical use |
 | --- | --- |
 | `platform version [--format json]` | Print the installed release without requiring a configured repository. `platform --version` is the shorter equivalent. |
-| `platform init [--discovery-root <path> ...] [--namespace <name>] [--builder <name>] [--registry-provider oci\|ecr] [--build-arg NAME=VALUE ...]` | Safely create `platform-images.toml` by inferring existing target groups or using explicit roots. Refuses to overwrite existing configuration. |
+| `platform init [--discovery-root <path> ...] [--namespace <name>] [--builder <name>] [--registry-provider oci\|ecr] [--build-arg NAME=VALUE ...]` | Safely create `platform-images.toml` by inferring target groups and a minimal cascading repository policy. Applies strong unique mappings with a review audit and refuses to overwrite existing configuration. |
 | `platform images list` | Inventory discovered image targets. |
 | `platform images show <name>` | Inspect one target's build file, output repository, aliases, dependencies, exact source-to-target bindings, and dependents. |
 | `platform images validate` | Gate commits before planning or building. |
@@ -1541,8 +1610,10 @@ The default benchmark is deliberately awkward rather than perfectly tidy. It cre
 repositories, Nexus/GitLab/GHCR spellings, ARG-based parents, aliases, digests, multistage
 references, `COPY`/`ADD`/`RUN --mount` inputs, public and explicitly external images, heredocs, 28
 non-image directories, and eight qualified references that deliberately remain warnings. The unit
-suite also mutates the full corpus to prove deterministic rejection of cycles, ambiguous aliases,
-missing managed images, and malformed syntax.
+suite also runs `platform init` over a separate 320-image qualified-reference chain, proves that
+one inferred namespace cascades across all 320 targets, and confirms that only eight genuine remote
+basename exceptions are written. It mutates the full corpus to prove deterministic rejection of
+cycles, ambiguous aliases, missing managed images, and malformed syntax.
 
 These are median results from 14 August 2026 using Python 3.12:
 

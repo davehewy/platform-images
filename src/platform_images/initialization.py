@@ -4,16 +4,20 @@ import difflib
 import json
 import os
 import re
+from collections import Counter, defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from platform_images.backends import default_transport, validate_execution_pair
-from platform_images.config import NAMESPACE_RE, VARIABLE_NAME_RE, RepositoryConfig
+from platform_images.config import NAMESPACE_RE, VARIABLE_NAME_RE, ImageConfig, RepositoryConfig
 from platform_images.discovery import inspect_targets
 from platform_images.dockerfile import parse_dockerfile
 from platform_images.errors import PlatformImagesError
 from platform_images.image_identity import (
     build_image_identity_resolver,
+    compact_image_name,
+    probable_target_matches,
     registry_relative_repository,
     repository_name,
 )
@@ -26,6 +30,8 @@ from platform_images.models import (
 )
 
 CONFIGURATION_NAME = "platform-images.toml"
+_STRONG_MATCH_MINIMUM = 0.84
+_STRONG_MATCH_MARGIN = 0.08
 _IGNORED_DISCOVERY_DIRECTORIES = frozenset(
     {
         ".git",
@@ -51,6 +57,33 @@ class InitializationResult:
     allowed_short_external_images: tuple[str, ...]
     inferred_registry_namespace: str | None
     source_repository_namespaces: tuple[str, ...]
+    repository_inferences: tuple[RepositoryInference, ...]
+
+
+@dataclass(frozen=True)
+class RepositoryInference:
+    target: str
+    source_repository: str
+    action: str
+    confidence: str
+    reference_count: int
+
+
+@dataclass(frozen=True)
+class _RepositoryObservation:
+    target: str
+    repository: str
+    confidence: str
+    score: float
+    reference_count: int
+
+
+@dataclass(frozen=True)
+class _RepositoryPolicy:
+    namespace: str | None
+    source_namespaces: tuple[str, ...]
+    images: Mapping[str, ImageConfig]
+    review: tuple[RepositoryInference, ...]
 
 
 def _default_namespace(root: Path) -> str:
@@ -137,11 +170,11 @@ def _target_directories(root: Path, discovery_roots: tuple[str, ...]) -> tuple[P
     return tuple(directories)
 
 
-def _find_qualified_local_repositories(
+def _qualified_repository_reference_counts(
     target_directories: tuple[Path, ...], namespace: str
-) -> dict[str, frozenset[str]]:
+) -> Counter[str]:
     target_names = frozenset(directory.name for directory in target_directories)
-    candidates: dict[str, set[str]] = {}
+    references: Counter[str] = Counter()
     for directory in target_directories:
         for build_file in (directory / "Dockerfile", directory / "Containerfile"):
             if not build_file.is_file():
@@ -162,29 +195,179 @@ def _find_qualified_local_repositories(
                 repository = repository_name(source)
                 if "/" not in repository:
                     continue
-                target_name = repository.rsplit("/", 1)[-1]
-                if target_name in target_names:
-                    candidates.setdefault(target_name, set()).add(
-                        registry_relative_repository(repository)
-                    )
+                references[registry_relative_repository(repository)] += 1
 
-    return {target: frozenset(repositories) for target, repositories in sorted(candidates.items())}
+    return references
 
 
-def _repository_namespaces(
-    repositories: dict[str, frozenset[str]],
-) -> tuple[str, ...]:
-    observed = {repository for values in repositories.values() for repository in values}
-    if any("/" not in repository for repository in observed):
-        return ()
-    return tuple(sorted({repository.rsplit("/", 1)[0] for repository in observed}))
+def _infer_repository_target(
+    repository: str,
+    target_names: frozenset[str],
+) -> tuple[str, str, float] | None:
+    basename = repository.rsplit("/", 1)[-1]
+    if basename in target_names:
+        return basename, "exact", 1.0
 
-
-def _common_repository_namespace(repositories: dict[str, frozenset[str]]) -> str | None:
-    if not repositories:
+    compact_basename = compact_image_name(basename)
+    normalized = sorted(
+        target for target in target_names if compact_image_name(target) == compact_basename
+    )
+    if len(normalized) == 1:
+        return normalized[0], "separator-normalized", 1.0
+    if normalized:
+        # A punctuation-only collision is genuinely ambiguous. Do not let fuzzy scoring pick one.
         return None
-    namespaces = _repository_namespaces(repositories)
-    return namespaces[0] if len(namespaces) == 1 else None
+
+    ranked = probable_target_matches(repository, target_names)
+    if not ranked:
+        return None
+    target, score = ranked[0]
+    runner_up = ranked[1][1] if len(ranked) > 1 else 0.0
+    if score >= _STRONG_MATCH_MINIMUM and score - runner_up >= _STRONG_MATCH_MARGIN:
+        return target, "strong-similarity", score
+    return None
+
+
+def _repository_namespace(repository: str) -> str | None:
+    return repository.rsplit("/", 1)[0] if "/" in repository else None
+
+
+def _select_repository_namespace(
+    observations: tuple[_RepositoryObservation, ...],
+) -> str | None:
+    by_namespace: dict[str, list[_RepositoryObservation]] = defaultdict(list)
+    for observation in observations:
+        namespace = _repository_namespace(observation.repository)
+        if namespace is not None:
+            by_namespace[namespace].append(observation)
+    if not by_namespace:
+        return None
+
+    def rank(values: list[_RepositoryObservation]) -> tuple[int, int, int]:
+        targets = {value.target for value in values}
+        references = sum(value.reference_count for value in values)
+        confidence = sum(
+            {"exact": 3, "separator-normalized": 2, "strong-similarity": 1}[value.confidence]
+            for value in values
+        )
+        return len(targets), references, confidence
+
+    ranked = sorted(
+        ((rank(values), namespace) for namespace, values in by_namespace.items()),
+        key=lambda item: (item[0], item[1]),
+        reverse=True,
+    )
+    if len(ranked) > 1 and ranked[0][0] == ranked[1][0]:
+        return None
+    return ranked[0][1]
+
+
+def _infer_repository_policy(
+    target_directories: tuple[Path, ...],
+    requested_namespace: str,
+    *,
+    namespace_explicit: bool,
+) -> _RepositoryPolicy:
+    target_names = frozenset(directory.name for directory in target_directories)
+    reference_counts = _qualified_repository_reference_counts(
+        target_directories,
+        requested_namespace,
+    )
+    observations: list[_RepositoryObservation] = []
+    for repository, reference_count in sorted(reference_counts.items()):
+        inferred = _infer_repository_target(repository, target_names)
+        if inferred is None:
+            continue
+        target, confidence, score = inferred
+        observations.append(
+            _RepositoryObservation(target, repository, confidence, score, reference_count)
+        )
+
+    ordered_observations = tuple(observations)
+    inferred_namespace = (
+        None if namespace_explicit else _select_repository_namespace(ordered_observations)
+    )
+    configured_namespace = (
+        requested_namespace if namespace_explicit else (inferred_namespace or requested_namespace)
+    )
+    by_target: dict[str, list[_RepositoryObservation]] = defaultdict(list)
+    for observation in ordered_observations:
+        by_target[observation.target].append(observation)
+
+    images: dict[str, ImageConfig] = {}
+    review: list[RepositoryInference] = []
+    for target, target_observations in sorted(by_target.items()):
+        canonical_candidates = [
+            observation
+            for observation in target_observations
+            if _repository_namespace(observation.repository) == configured_namespace
+        ]
+        canonical = (
+            sorted(
+                canonical_candidates,
+                key=lambda value: (
+                    value.reference_count,
+                    value.score,
+                    value.repository,
+                ),
+                reverse=True,
+            )[0]
+            if canonical_candidates
+            else None
+        )
+        default_repository = f"{configured_namespace}/{target}"
+        configured_repository = (
+            canonical.repository
+            if canonical is not None and canonical.repository != default_repository
+            else None
+        )
+        aliases = tuple(
+            sorted(
+                {
+                    observation.repository
+                    for observation in target_observations
+                    if observation is not canonical
+                    and observation.repository.rsplit("/", 1)[-1] != target
+                }
+            )
+        )
+        if configured_repository is not None or aliases:
+            images[target] = ImageConfig(configured_repository, aliases)
+
+        for observation in target_observations:
+            if observation.confidence == "exact":
+                continue
+            if observation is canonical and configured_repository is not None:
+                action = "canonical repository override"
+            elif observation.repository in aliases:
+                action = "dependency alias"
+            else:
+                action = "automatic basename match"
+            review.append(
+                RepositoryInference(
+                    target,
+                    observation.repository,
+                    action,
+                    observation.confidence,
+                    observation.reference_count,
+                )
+            )
+
+    source_namespaces = tuple(
+        sorted(
+            {
+                namespace
+                for observation in ordered_observations
+                if (namespace := _repository_namespace(observation.repository)) is not None
+            }
+        )
+    )
+    return _RepositoryPolicy(
+        inferred_namespace,
+        source_namespaces,
+        dict(sorted(images.items())),
+        tuple(sorted(review, key=lambda item: (item.target, item.source_repository))),
+    )
 
 
 def _infer_short_external_images(
@@ -237,6 +420,18 @@ def _toml_array(values: tuple[str, ...]) -> str:
     return f"[\n{items}\n]"
 
 
+def _image_configuration(images: Mapping[str, ImageConfig]) -> str:
+    sections: list[str] = []
+    for target, image in sorted(images.items()):
+        lines = [f"[images.{json.dumps(target)}]"]
+        if image.repository is not None:
+            lines.append(f"repository = {json.dumps(image.repository)}")
+        if image.aliases:
+            lines.append(f"aliases = {_toml_array(image.aliases)}")
+        sections.append("\n".join(lines))
+    return "\n\n".join(sections)
+
+
 def _configuration_text(
     *,
     namespace: str,
@@ -249,6 +444,7 @@ def _configuration_text(
     registry_username_environment_variable: str,
     registry_password_environment_variable: str,
     build_arguments: dict[str, str],
+    images: Mapping[str, ImageConfig],
 ) -> str:
     global_inputs = (
         ".github/workflows/**",
@@ -263,6 +459,8 @@ def _configuration_text(
     arguments_configuration = (
         f"\n[dockerfile.arguments]\n{rendered_arguments}\n" if rendered_arguments else ""
     )
+    image_configuration = _image_configuration(images)
+    rendered_images = f"\n{image_configuration}\n" if image_configuration else ""
     return f"""\
 [registry]
 namespace = {json.dumps(namespace)}
@@ -285,6 +483,7 @@ backend = {json.dumps(builder.value)}
 [dockerfile]
 allowed_short_external_images = {_toml_array(allowed_short_external_images)}
 {arguments_configuration}
+{rendered_images}
 
 [changes]
 global_inputs = {_toml_array(global_inputs)}
@@ -360,12 +559,12 @@ def initialize_repository(
         _normalize_roots(root, discovery_roots) if discovery_roots else _infer_roots(root)
     )
     target_directories = _target_directories(root, configured_roots)
-    observed_repositories = _find_qualified_local_repositories(
-        target_directories, requested_namespace
+    repository_policy = _infer_repository_policy(
+        target_directories,
+        requested_namespace,
+        namespace_explicit=namespace is not None,
     )
-    inferred_namespace = (
-        _common_repository_namespace(observed_repositories) if namespace is None else None
-    )
+    inferred_namespace = repository_policy.namespace
     configured_namespace = inferred_namespace or requested_namespace
     external_images = _infer_short_external_images(
         target_directories,
@@ -382,6 +581,7 @@ def initialize_repository(
         registry_username_environment_variable=registry_username_environment_variable,
         registry_password_environment_variable=registry_password_environment_variable,
         build_arguments=selected_build_arguments,
+        images=repository_policy.images,
     )
 
     try:
@@ -402,5 +602,6 @@ def initialize_repository(
         len(target_directories),
         external_images,
         inferred_namespace,
-        _repository_namespaces(observed_repositories),
+        repository_policy.source_namespaces,
+        repository_policy.review,
     )

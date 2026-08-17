@@ -31,6 +31,45 @@ from platform_images.validation import ValidationReport, validate_repository
 IMAGE_COUNT = 360
 
 
+def test_init_cascades_one_repository_policy_across_320_images(tmp_path: Path, capsys) -> None:
+    root = tmp_path / "large-adoption-repository"
+    targets = root / "owned" / "container-images"
+
+    def logical_name(index: int) -> str:
+        return f"service{index:03d}" if index % 40 == 0 else f"service-{index:03d}"
+
+    def remote_name(index: int) -> str:
+        return f"service-{index:03d}"
+
+    for index in range(320):
+        directory = targets / logical_name(index)
+        directory.mkdir(parents=True)
+        source = (
+            "docker.io/library/alpine:3.22"
+            if index == 0
+            else f"nexus.example.com:8088/risk-repo/{remote_name(index - 1)}:latest"
+        )
+        (directory / "Dockerfile").write_text(f"FROM {source}\n", encoding="utf-8")
+
+    assert main(["init"], cwd=root, environment={}) == 0
+
+    config = RepositoryConfig.load(root)
+    report = validate_repository(config)
+    assert report.valid
+    assert not report.warnings
+    assert config.registry.namespace == "risk-repo"
+    assert len(config.images) == 8
+    assert all(
+        config.image_repository(logical_name(index)) == f"risk-repo/{remote_name(index)}"
+        for index in range(0, 320, 40)
+    )
+    assert sum(map(len, report.graph.dependencies.values())) == 319
+    assert report.graph.topological_order() == tuple(logical_name(index) for index in range(320))
+    output = capsys.readouterr().out
+    assert "Discovered 320 image targets" in output
+    assert "init applied 8 inferred repository mappings" in output
+
+
 @pytest.fixture(scope="module")
 def imperfect_repository(
     tmp_path_factory: pytest.TempPathFactory,

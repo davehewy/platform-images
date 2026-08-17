@@ -52,15 +52,28 @@ def _relative(path: Path, root: Path) -> str:
         return str(path)
 
 
-def _manual_mapping_hint(reference: str, target: str) -> str:
+def _recommended_mapping_hint(
+    reference: str,
+    target: str,
+    namespace: str,
+    *,
+    reference_count: int = 1,
+) -> str:
     repository = repository_name(reference)
     relative = registry_relative_repository(repository)
+    source_namespace = relative.rsplit("/", 1)[0] if "/" in relative else None
+    table = f"[images.{json.dumps(target)}]"
+    if source_namespace == namespace:
+        setting = f"repository = {json.dumps(relative)}"
+        reason = "the source is inside the configured output namespace"
+    else:
+        setting = f"aliases = [{json.dumps(relative)}]"
+        reason = "the source is outside the configured output namespace"
+    references = "reference" if reference_count == 1 else "references"
     return (
-        f"if this is local, add aliases = [{json.dumps(repository)}] under "
-        f"[images.{json.dumps(target)}]; if it is also the published destination, set "
-        f"repository = {json.dumps(relative)}; "
-        f"if it is intentionally external, add external_repositories = "
-        f"[{json.dumps(repository)}] under [identity]"
+        f"recommended single change for all {reference_count} {references}: add {setting} under "
+        f"{table} because {reason}; if the inferred local relationship is wrong, mark "
+        f"{repository!r} external under [identity] instead"
     )
 
 
@@ -80,6 +93,20 @@ def _build_argument_hint(reference: str) -> str | None:
     return (
         "set deterministic values used by both dependency parsing and builds under "
         f"[dockerfile.arguments], for example: {examples}"
+    )
+
+
+def _internal_reference_hint(
+    reference: str,
+    target: str,
+    canonical_repository: str,
+) -> str:
+    relative = registry_relative_repository(reference)
+    return (
+        f"recommended: correct the source to {canonical_repository!r} (or short local target "
+        f"{target!r}) so it follows the configured repository cascade; if {relative!r} is an "
+        f"intentional legacy spelling, add aliases = [{json.dumps(relative)}] under "
+        f"[images.{json.dumps(target)}]"
     )
 
 
@@ -199,6 +226,10 @@ def validate_repository(config: RepositoryConfig) -> ValidationReport:
                     )
                 )
 
+    probable_references: dict[
+        tuple[str, tuple[str, ...]],
+        list[tuple[str, int, str]],
+    ] = {}
     for target_name in sorted(targets):
         target = targets[target_name]
         dockerfile_path = _relative(target.dockerfile, root)
@@ -243,7 +274,15 @@ def validate_repository(config: RepositoryConfig) -> ValidationReport:
                         f"internal image target does not exist: {reference.raw}",
                         dockerfile_path,
                         reference.line_number,
-                        _manual_mapping_hint(reference.resolved, matches[0]) if matches else None,
+                        (
+                            _internal_reference_hint(
+                                reference.resolved,
+                                matches[0],
+                                config.image_repository(matches[0]),
+                            )
+                            if matches
+                            else None
+                        ),
                     )
                 )
             elif reference.resolved is not None and "/" not in reference.resolved.split("@", 1)[0]:
@@ -279,19 +318,14 @@ def validate_repository(config: RepositoryConfig) -> ValidationReport:
         for reference in graph.external_dependencies[target_name]:
             if reference.resolved is None:
                 continue
-            matches = image_identities.probable_local_targets(reference.resolved)
-            if not matches:
+            ranked_matches = image_identities.probable_local_matches(reference.resolved)
+            if not ranked_matches:
                 continue
-            issues.append(
-                ValidationIssue(
-                    "probable-local-reference",
-                    "warning",
-                    f"qualified image reference resembles local target {matches[0]!r} but is "
-                    f"currently external: {reference.raw}",
-                    dockerfile_path,
-                    reference.line_number,
-                    _manual_mapping_hint(reference.resolved, matches[0]),
-                )
+            best_score = ranked_matches[0][1]
+            matches = tuple(target for target, score in ranked_matches if score == best_score)
+            repository = repository_name(reference.resolved)
+            probable_references.setdefault((repository, matches), []).append(
+                (dockerfile_path, reference.line_number, reference.raw)
             )
         for alias, line in graph.parse_results[target_name].stage_aliases:
             if alias in targets:
@@ -316,6 +350,43 @@ def validate_repository(config: RepositoryConfig) -> ValidationReport:
                         reference.line_number,
                     )
                 )
+
+    for (repository, matches), references in sorted(probable_references.items()):
+        path, line, raw = sorted(references)[0]
+        count = len(references)
+        files = len({reference_path for reference_path, _line, _raw in references})
+        if len(matches) == 1:
+            target_description = f"local target {matches[0]!r}"
+            hint = _recommended_mapping_hint(
+                repository,
+                matches[0],
+                config.registry.namespace,
+                reference_count=count,
+            )
+        else:
+            target_description = "multiple local targets: " + ", ".join(
+                repr(match) for match in matches
+            )
+            hint = (
+                "review the colliding local names and add one explicit alias under the intended "
+                "target; no automatic mapping was made"
+            )
+        usage = (
+            f"{count} references across {files} build files"
+            if count != 1 or files != 1
+            else "1 reference"
+        )
+        issues.append(
+            ValidationIssue(
+                "probable-local-reference",
+                "warning",
+                f"qualified image repository resembles {target_description} but is currently "
+                f"external ({usage}): {repository}; first spelling: {raw}",
+                path,
+                line,
+                hint,
+            )
+        )
 
     cycle = graph.find_cycle()
     if cycle:
