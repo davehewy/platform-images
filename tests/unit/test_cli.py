@@ -26,9 +26,10 @@ def test_root_and_images_help_list_described_commands_one_per_line(capsys) -> No
     assert root_help.value.code == 0
     root_output = capsys.readouterr().out
     assert "COMMAND" in root_output
-    assert "    init      create a safe starter configuration" in root_output
-    assert "    images    inspect, plan, build, and publish" in root_output
-    assert "    version   print the installed platform-images version" in root_output
+    assert "    init       create a safe starter configuration" in root_output
+    assert "    reconcile  update existing configuration" in root_output
+    assert "    images     inspect, plan, build, and publish" in root_output
+    assert "    version    print the installed platform-images version" in root_output
 
     with pytest.raises(SystemExit) as images_help:
         main(["images", "--help"])
@@ -586,6 +587,286 @@ def test_init_rejects_incompatible_builder_and_transport(tmp_path: Path, capsys)
     assert "cannot use registry transport" in capsys.readouterr().err
 
 
+def test_reconcile_checks_then_applies_minimal_updates_and_is_idempotent(
+    tmp_path: Path, capsys
+) -> None:
+    root = tmp_path / "repository"
+    targets = root / "containers"
+    base = targets / "ubuntu24-04-base"
+    application = targets / "application"
+    utility = targets / "utility"
+    for directory in (base, application, utility):
+        directory.mkdir(parents=True)
+    (base / "Dockerfile").write_text("FROM ubuntu:24.04\n", encoding="utf-8")
+    (application / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    (utility / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+
+    assert main(["init", "--namespace", "owned/team"], cwd=root, environment={}) == 0
+    capsys.readouterr()
+    configuration = root / "platform-images.toml"
+    configuration.write_text(
+        configuration.read_text(encoding="utf-8")
+        .replace(
+            "[tags]",
+            "# This team-owned comment must survive reconciliation.\n[tags]",
+        )
+        .replace(
+            "allowed_short_external_images = [",
+            "allowed_short_external_images = [ # Approved base-image policy.",
+        ),
+        encoding="utf-8",
+    )
+    configuration.chmod(0o640)
+    before = configuration.read_text(encoding="utf-8")
+    (application / "Dockerfile").write_text(
+        "FROM nexus.example.com/legacy/ubuntu-24-04-base:latest\n",
+        encoding="utf-8",
+    )
+    (utility / "Dockerfile").write_text("FROM rockylinux:9\n", encoding="utf-8")
+
+    assert main(["reconcile", "--check"], cwd=root, environment={}) == 1
+    assert configuration.read_text(encoding="utf-8") == before
+    check_output = capsys.readouterr().out
+    assert "Configuration reconciliation required" in check_output
+    assert "Run 'platform reconcile'" in check_output
+    assert '+[images."ubuntu24-04-base"]' in check_output
+
+    assert main(["reconcile"], cwd=root, environment={}) == 0
+    output = capsys.readouterr().out
+    assert "Updated platform-images.toml" in output
+    assert "Added unambiguous short external images:" in output
+    assert "  - rockylinux" in output
+    assert "legacy/ubuntu-24-04-base -> ubuntu24-04-base" in output
+    assert "dependency alias" in output
+
+    config = RepositoryConfig.load(root)
+    assert config.registry.namespace == "owned/team"
+    assert config.image_repository("ubuntu24-04-base") == "owned/team/ubuntu24-04-base"
+    assert config.image_aliases("ubuntu24-04-base") == ("legacy/ubuntu-24-04-base",)
+    assert "rockylinux" in config.dockerfile.allowed_short_external_images
+    reconciled = configuration.read_text(encoding="utf-8")
+    assert configuration.stat().st_mode & 0o777 == 0o640
+    assert "# This team-owned comment must survive reconciliation." in reconciled
+    assert "# Approved base-image policy." in reconciled
+    assert validate_repository(config).graph.direct_dependencies("application") == (
+        "ubuntu24-04-base",
+    )
+
+    assert main(["reconcile"], cwd=root, environment={}) == 0
+    assert configuration.read_text(encoding="utf-8") == reconciled
+    assert "Configuration already reconciled" in capsys.readouterr().out
+
+
+def test_reconcile_adds_a_canonical_exception_inside_the_existing_namespace(
+    tmp_path: Path, capsys
+) -> None:
+    root = tmp_path / "repository"
+    targets = root / "containers"
+    base = targets / "ubuntu24-04-base"
+    application = targets / "application"
+    base.mkdir(parents=True)
+    application.mkdir(parents=True)
+    (base / "Dockerfile").write_text("FROM ubuntu:24.04\n", encoding="utf-8")
+    (application / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    assert (
+        main(
+            [
+                "init",
+                "--namespace",
+                "risk-repo",
+                "--build-arg",
+                "PARENT=nexus.example.com:8088/risk-repo/ubuntu-24-04-base:latest",
+            ],
+            cwd=root,
+            environment={},
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    (application / "Dockerfile").write_text(
+        "ARG PARENT\nFROM ${PARENT}\n",
+        encoding="utf-8",
+    )
+    assert main(["reconcile"], cwd=root, environment={}) == 0
+
+    config = RepositoryConfig.load(root)
+    assert config.registry.namespace == "risk-repo"
+    assert config.image_repository("ubuntu24-04-base") == "risk-repo/ubuntu-24-04-base"
+    assert config.image_aliases("ubuntu24-04-base") == ()
+    assert "canonical repository override" in capsys.readouterr().out
+
+
+def test_reconcile_adds_a_missing_optional_table_without_changing_crlf_newlines(
+    tmp_path: Path, capsys
+) -> None:
+    root = tmp_path / "repository"
+    target = root / "containers" / "base"
+    target.mkdir(parents=True)
+    (target / "Dockerfile").write_text("FROM rockylinux:9\n", encoding="utf-8")
+    configuration = root / "platform-images.toml"
+    contents = """\
+[registry]
+namespace = "team"
+registry_environment_variable = "PLATFORM_IMAGES_REGISTRY"
+stable_tag = "main"
+
+[tags]
+ci_prefix = "ci"
+commit_prefix = "sha"
+
+[changes]
+global_inputs = ["platform-images.toml"]
+
+[discovery]
+roots = ["containers"]
+"""
+    with configuration.open("w", encoding="utf-8", newline="") as stream:
+        stream.write(contents.replace("\n", "\r\n"))
+
+    assert main(["reconcile"], cwd=root, environment={}) == 0
+
+    config = RepositoryConfig.load(root)
+    assert "rockylinux" in config.dockerfile.allowed_short_external_images
+    raw = configuration.read_bytes()
+    assert b"[dockerfile]\r\n" in raw
+    assert b"\n" not in raw.replace(b"\r\n", b"")
+    assert "Validation passed (1 image target)." in capsys.readouterr().out
+
+
+def test_reconcile_preserves_an_existing_output_override_and_adds_an_input_alias(
+    tmp_path: Path, capsys
+) -> None:
+    root = tmp_path / "repository"
+    targets = root / "containers"
+    base = targets / "ubuntu24-04-base"
+    application = targets / "application"
+    base.mkdir(parents=True)
+    application.mkdir(parents=True)
+    (base / "Dockerfile").write_text("FROM ubuntu:24.04\n", encoding="utf-8")
+    (application / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    assert main(["init", "--namespace", "owned/team"], cwd=root, environment={}) == 0
+    capsys.readouterr()
+    configuration = root / "platform-images.toml"
+    with configuration.open("a", encoding="utf-8") as stream:
+        stream.write(
+            '\n[images."ubuntu24-04-base"]\n'
+            "# This output is intentionally different.\n"
+            'repository = "owned/team/custom-base"\n'
+            'aliases = ["retired/team/ubuntu-base"]\n'
+        )
+    (application / "Dockerfile").write_text(
+        "FROM nexus.example.com/owned/team/ubuntu-24-04-base:latest\n",
+        encoding="utf-8",
+    )
+
+    assert main(["reconcile"], cwd=root, environment={}) == 0
+
+    config = RepositoryConfig.load(root)
+    assert config.image_repository("ubuntu24-04-base") == "owned/team/custom-base"
+    assert config.image_aliases("ubuntu24-04-base") == (
+        "owned/team/ubuntu-24-04-base",
+        "retired/team/ubuntu-base",
+    )
+    text = configuration.read_text(encoding="utf-8")
+    assert "# This output is intentionally different." in text
+    assert 'repository = "owned/team/custom-base"' in text
+    assert "dependency alias" in capsys.readouterr().out
+
+
+def test_reconcile_respects_external_exceptions_and_leaves_ambiguity_for_review(
+    tmp_path: Path, capsys
+) -> None:
+    root = tmp_path / "repository"
+    targets = root / "containers"
+    for name in ("ubuntu24-04-base", "ubuntu-2404-base"):
+        directory = targets / name
+        directory.mkdir(parents=True)
+        (directory / "Dockerfile").write_text("FROM ubuntu:24.04\n", encoding="utf-8")
+    consumer = targets / "consumer"
+    consumer.mkdir(parents=True)
+    (consumer / "Dockerfile").write_text(
+        "FROM nexus.example.com/risk-repo/ubuntu-24-04-base:latest\n",
+        encoding="utf-8",
+    )
+    assert main(["init", "--namespace", "owned/team"], cwd=root, environment={}) == 0
+    capsys.readouterr()
+    configuration = root / "platform-images.toml"
+    before = configuration.read_text(encoding="utf-8")
+
+    assert main(["reconcile"], cwd=root, environment={}) == 0
+
+    assert configuration.read_text(encoding="utf-8") == before
+    output = capsys.readouterr().out
+    assert "Configuration already reconciled" in output
+    assert "multiple local targets" in output
+
+    with configuration.open("a", encoding="utf-8") as stream:
+        stream.write('\n[identity]\nexternal_repositories = ["risk-repo/ubuntu-24-04-base"]\n')
+    external_before = configuration.read_text(encoding="utf-8")
+    assert main(["reconcile"], cwd=root, environment={}) == 0
+    assert configuration.read_text(encoding="utf-8") == external_before
+    assert "Warnings:" not in capsys.readouterr().out
+
+
+def test_reconcile_refuses_to_rewrite_an_inline_image_table(tmp_path: Path, capsys) -> None:
+    root = tmp_path / "repository"
+    targets = root / "containers"
+    base = targets / "ubuntu24-04-base"
+    application = targets / "application"
+    base.mkdir(parents=True)
+    application.mkdir(parents=True)
+    (base / "Dockerfile").write_text("FROM ubuntu:24.04\n", encoding="utf-8")
+    (application / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    assert main(["init", "--namespace", "owned/team"], cwd=root, environment={}) == 0
+    capsys.readouterr()
+    configuration = root / "platform-images.toml"
+    configuration.write_text(
+        'images = { "ubuntu24-04-base" = { repository = "owned/team/custom" } }\n\n'
+        + configuration.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    before = configuration.read_text(encoding="utf-8")
+    (application / "Dockerfile").write_text(
+        "FROM nexus.example.com/legacy/ubuntu-24-04-base:latest\n",
+        encoding="utf-8",
+    )
+
+    assert main(["reconcile"], cwd=root, environment={}) == 1
+
+    assert configuration.read_text(encoding="utf-8") == before
+    assert "cannot safely reconcile inline images.ubuntu24-04-base" in capsys.readouterr().err
+
+
+def test_reconcile_rolls_back_an_inferred_mapping_that_would_create_a_cycle(
+    tmp_path: Path, capsys
+) -> None:
+    root = tmp_path / "repository"
+    targets = root / "containers"
+    base = targets / "base-image"
+    application = targets / "app-image"
+    base.mkdir(parents=True)
+    application.mkdir(parents=True)
+    (base / "Dockerfile").write_text("FROM alpine\n", encoding="utf-8")
+    (application / "Dockerfile").write_text("FROM alpine\n", encoding="utf-8")
+    assert main(["init", "--namespace", "team"], cwd=root, environment={}) == 0
+    capsys.readouterr()
+    configuration = root / "platform-images.toml"
+    before = configuration.read_text(encoding="utf-8")
+    (base / "Dockerfile").write_text(
+        "FROM nexus.example.com/team/appimage:latest\n",
+        encoding="utf-8",
+    )
+    (application / "Dockerfile").write_text("FROM base-image\n", encoding="utf-8")
+
+    assert main(["reconcile"], cwd=root, environment={}) == 1
+
+    assert configuration.read_text(encoding="utf-8") == before
+    error = capsys.readouterr().err
+    assert "would introduce validation errors" in error
+    assert "configuration was restored" in error
+
+
 def test_list_validate_graph_and_dry_run(
     repository_factory: Callable[[dict[str, str]], Path], capsys
 ) -> None:
@@ -920,6 +1201,24 @@ def test_render_plan_uses_persisted_json_and_rejects_graph_drift(
         == 0
     )
     assert "image_base:" in capsys.readouterr().out
+
+    assert (
+        main(
+            [
+                "images",
+                "render-plan",
+                str(plan_path),
+                "--format",
+                "gitlab",
+                "--gitlab-max-jobs",
+                "3",
+            ],
+            cwd=root,
+            environment=environment,
+        )
+        == 1
+    )
+    assert "requires 4 jobs" in capsys.readouterr().err
 
     data = json.loads(plan_path.read_text(encoding="utf-8"))
     data["targets"][1]["dependencies"] = []

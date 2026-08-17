@@ -24,7 +24,7 @@ from platform_images.changes import (
 )
 from platform_images.config import RepositoryConfig
 from platform_images.errors import PlatformImagesError
-from platform_images.initialization import initialize_repository
+from platform_images.initialization import initialize_repository, reconcile_repository
 from platform_images.manifests import (
     build_manifest_data,
     load_build_manifest,
@@ -56,7 +56,7 @@ from platform_images.registry import (
     registry_from_environment_json,
 )
 from platform_images.renderers.github import render_github_outputs, render_github_workflow
-from platform_images.renderers.gitlab import render_gitlab
+from platform_images.renderers.gitlab import GITLAB_DEFAULT_JOB_LIMIT, render_gitlab
 from platform_images.renderers.graph_json import graph_data, render_graph_json
 from platform_images.renderers.graph_text import render_graph_text
 from platform_images.renderers.plan_json import load_plan_json, render_plan_json
@@ -95,6 +95,7 @@ def _parser() -> argparse.ArgumentParser:
         epilog="""\
 examples:
   platform init
+  platform reconcile
   platform images validate
   platform images graph
   platform images build api --dry-run
@@ -183,6 +184,32 @@ examples:
         default=[],
         metavar="NAME=VALUE",
         help="checked-in Dockerfile ARG value used for graphing and builds; repeat as needed",
+    )
+
+    reconcile = root_subparsers.add_parser(
+        "reconcile",
+        help="update existing configuration from high-confidence repository evidence",
+        description=(
+            "Reconcile platform-images.toml with newly discovered external bases and qualified "
+            "references. Existing output policy remains authoritative, manual settings are "
+            "preserved, and only unique high-confidence additions are written."
+        ),
+        epilog="""\
+examples:
+  platform reconcile
+  platform reconcile --check
+""",
+    )
+    reconcile.add_argument(
+        "--root",
+        type=Path,
+        default=None,
+        help="repository root (default: current directory or PLATFORM_IMAGES_ROOT)",
+    )
+    reconcile.add_argument(
+        "--check",
+        action="store_true",
+        help="print the proposed diff without writing and fail when updates are available",
     )
 
     images = root_subparsers.add_parser(
@@ -281,6 +308,12 @@ Run 'platform images COMMAND --help' for command-specific options.
     plan.add_argument("--head")
     plan.add_argument("--ci", action="store_true")
     plan.add_argument("--format", choices=("text", "json", "gitlab"), default="text")
+    plan.add_argument(
+        "--gitlab-max-jobs",
+        type=int,
+        default=GITLAB_DEFAULT_JOB_LIMIT,
+        help=(f"configured GitLab per-pipeline job limit (default: {GITLAB_DEFAULT_JOB_LIMIT})"),
+    )
 
     render_plan = commands.add_parser(
         "render-plan",
@@ -289,6 +322,12 @@ Run 'platform images COMMAND --help' for command-specific options.
     )
     render_plan.add_argument("plan_file", type=Path)
     render_plan.add_argument("--format", choices=("text", "json", "gitlab"), default="gitlab")
+    render_plan.add_argument(
+        "--gitlab-max-jobs",
+        type=int,
+        default=GITLAB_DEFAULT_JOB_LIMIT,
+        help=(f"configured GitLab per-pipeline job limit (default: {GITLAB_DEFAULT_JOB_LIMIT})"),
+    )
 
     ci_build = commands.add_parser(
         "ci-build",
@@ -395,7 +434,18 @@ Run 'platform images COMMAND --help' for command-specific options.
         description="Render dependency-layered GitHub matrix outputs from a CI plan.",
     )
     github_matrix.add_argument("plan_file", type=Path)
-    github_matrix.add_argument("--max-layers", type=int, required=True)
+    github_matrix.add_argument(
+        "--max-layers",
+        type=int,
+        required=True,
+        help="static dependency layers available in the generated workflow",
+    )
+    github_matrix.add_argument(
+        "--max-shards",
+        type=int,
+        default=1,
+        help="parallel matrix jobs available per layer (default: 1)",
+    )
 
     workflow = commands.add_parser(
         "generate-workflow",
@@ -538,6 +588,57 @@ def _run_init(arguments: argparse.Namespace, cwd: Path | None) -> int:
         print(f"Initial validation found {len(report.errors)} {error_word}.")
         print("Next: platform images validate")
     return 0
+
+
+def _run_reconcile(arguments: argparse.Namespace, cwd: Path | None) -> int:
+    root = _root(arguments, cwd)
+    result = reconcile_repository(root, write=not arguments.check)
+    relative_configuration = result.configuration_path.relative_to(root).as_posix()
+
+    if result.changed:
+        if arguments.check:
+            print(f"Configuration reconciliation required: {relative_configuration}")
+        else:
+            print(f"Updated {relative_configuration}")
+        if result.added_short_external_images:
+            print("Added unambiguous short external images:")
+            for image in result.added_short_external_images:
+                print(f"  - {image}")
+        if result.repository_inferences:
+            mapping_word = "mapping" if len(result.repository_inferences) == 1 else "mappings"
+            print(
+                f"Applied {len(result.repository_inferences)} high-confidence repository "
+                f"{mapping_word}:"
+            )
+            for inference in result.repository_inferences:
+                reference_word = "reference" if inference.reference_count == 1 else "references"
+                print(
+                    f"  - {inference.source_repository} -> {inference.target} "
+                    f"({inference.confidence}, {inference.reference_count} {reference_word}; "
+                    f"{inference.action})"
+                )
+        print()
+        print(result.diff, end="" if result.diff.endswith("\n") else "\n")
+        if arguments.check:
+            print("Run 'platform reconcile' to apply these exact updates.")
+            return 1
+    else:
+        print(f"Configuration already reconciled: {relative_configuration}")
+
+    report = result.validation_report
+    if report.valid:
+        target_word = "target" if result.target_count == 1 else "targets"
+        print(f"Validation passed ({result.target_count} image {target_word}).")
+        if report.warnings:
+            _summary, _separator, warning_details = _render_validation(report, "text").partition(
+                "\n\n"
+            )
+            print()
+            print(warning_details)
+        return 0
+
+    print(_render_validation(report, "text"), file=sys.stderr)
+    return 1
 
 
 def _issue_data(issue: ValidationIssue) -> dict[str, object]:
@@ -828,6 +929,8 @@ def _run(arguments: argparse.Namespace, cwd: Path | None, environment: Mapping[s
         return 0
     if arguments.group == "init":
         return _run_init(arguments, cwd)
+    if arguments.group == "reconcile":
+        return _run_reconcile(arguments, cwd)
 
     root = _root(arguments, cwd)
     config = RepositoryConfig.load(root)
@@ -929,7 +1032,15 @@ def _run(arguments: argparse.Namespace, cwd: Path | None, environment: Mapping[s
             registry = environment.get(config.registry.registry_environment_variable)
             if not registry:
                 raise PlatformImagesError("registry is required for GitLab rendering")
-            print(render_gitlab(plan, config, registry), end="")
+            print(
+                render_gitlab(
+                    plan,
+                    config,
+                    registry,
+                    max_jobs=arguments.gitlab_max_jobs,
+                ),
+                end="",
+            )
         else:
             print(render_plan_text(plan))
         return 0
@@ -945,7 +1056,15 @@ def _run(arguments: argparse.Namespace, cwd: Path | None, environment: Mapping[s
             registry = environment.get(config.registry.registry_environment_variable)
             if not registry:
                 raise PlatformImagesError("registry is required for GitLab rendering")
-            print(render_gitlab(plan, config, registry), end="")
+            print(
+                render_gitlab(
+                    plan,
+                    config,
+                    registry,
+                    max_jobs=arguments.gitlab_max_jobs,
+                ),
+                end="",
+            )
         return 0
     if arguments.command == "ci-build":
         builder, transport = _execution(arguments, config)
@@ -1080,7 +1199,7 @@ def _run(arguments: argparse.Namespace, cwd: Path | None, environment: Mapping[s
         plan = _load_plan(arguments.plan_file, graph, config)
         if plan.mode is BuildMode.LOCAL:
             raise PlatformImagesError("github-matrix requires a CI plan")
-        print(render_github_outputs(plan, arguments.max_layers))
+        print(render_github_outputs(plan, arguments.max_layers, arguments.max_shards))
         return 0
     if arguments.command == "generate-workflow":
         builder, transport = _execution(

@@ -43,10 +43,13 @@ package makes repository conventions explicit and testable.
 10. **GitHub renderer** generates static graph-depth jobs whose runtime matrices contain only the
     dependency-safe layers of the affected plan. The saved plan is passed as an artifact and
     strictly revalidated in every matrix build.
-11. **Manifest verifier** joins per-target results only when their commit, source, output, digest,
+11. **Configuration reconciler** reruns adoption inference inside configured roots, merges only
+    high-confidence additive identity policy, writes atomically, and restores the original file if
+    a proposed mapping introduces a new graph error.
+12. **Manifest verifier** joins per-target results only when their commit, source, output, digest,
     dependency inputs, and expected target set agree with the plan. The resulting JSON is the
     downstream and release bill of materials.
-12. **Registry provider and transport** resolve stable tags without pulling layers. ECR uses the
+13. **Registry provider and transport** resolve stable tags without pulling layers. ECR uses the
     account and region encoded by its hostname; generic OCI uses the Distribution manifest API,
     including Basic/Bearer challenges and digest-header validation. Builder capabilities determine
     direct or local output; transport capabilities own authentication, inspection, digest capture,

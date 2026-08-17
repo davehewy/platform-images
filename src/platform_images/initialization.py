@@ -4,6 +4,9 @@ import difflib
 import json
 import os
 import re
+import stat
+import tempfile
+import tomllib
 from collections import Counter, defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -28,6 +31,7 @@ from platform_images.models import (
     RegistryProvider,
     RegistryTransport,
 )
+from platform_images.validation import ValidationReport, validate_repository
 
 CONFIGURATION_NAME = "platform-images.toml"
 _STRONG_MATCH_MINIMUM = 0.84
@@ -58,6 +62,17 @@ class InitializationResult:
     inferred_registry_namespace: str | None
     source_repository_namespaces: tuple[str, ...]
     repository_inferences: tuple[RepositoryInference, ...]
+
+
+@dataclass(frozen=True)
+class ReconciliationResult:
+    configuration_path: Path
+    target_count: int
+    changed: bool
+    diff: str
+    added_short_external_images: tuple[str, ...]
+    repository_inferences: tuple[RepositoryInference, ...]
+    validation_report: ValidationReport
 
 
 @dataclass(frozen=True)
@@ -171,7 +186,9 @@ def _target_directories(root: Path, discovery_roots: tuple[str, ...]) -> tuple[P
 
 
 def _qualified_repository_reference_counts(
-    target_directories: tuple[Path, ...], namespace: str
+    target_directories: tuple[Path, ...],
+    namespace: str,
+    build_arguments: Mapping[str, str] | None = None,
 ) -> Counter[str]:
     target_names = frozenset(directory.name for directory in target_directories)
     references: Counter[str] = Counter()
@@ -187,6 +204,7 @@ def _qualified_repository_reference_counts(
                 text,
                 target_names=target_names,
                 internal_namespace=namespace,
+                build_arguments=build_arguments,
             )
             for reference in parsed.references:
                 source = reference.source or reference.resolved
@@ -267,14 +285,19 @@ def _infer_repository_policy(
     requested_namespace: str,
     *,
     namespace_explicit: bool,
+    ignored_repositories: frozenset[str] = frozenset(),
+    build_arguments: Mapping[str, str] | None = None,
 ) -> _RepositoryPolicy:
     target_names = frozenset(directory.name for directory in target_directories)
     reference_counts = _qualified_repository_reference_counts(
         target_directories,
         requested_namespace,
+        build_arguments,
     )
     observations: list[_RepositoryObservation] = []
     for repository, reference_count in sorted(reference_counts.items()):
+        if repository in ignored_repositories:
+            continue
         inferred = _infer_repository_target(repository, target_names)
         if inferred is None:
             continue
@@ -373,6 +396,7 @@ def _infer_repository_policy(
 def _infer_short_external_images(
     target_directories: tuple[Path, ...],
     namespace: str,
+    build_arguments: Mapping[str, str] | None = None,
 ) -> tuple[str, ...]:
     target_names = frozenset(directory.name for directory in target_directories)
     identities = build_image_identity_resolver(
@@ -396,6 +420,7 @@ def _infer_short_external_images(
                 target_names=target_names,
                 internal_namespace=namespace,
                 image_identities=identities,
+                build_arguments=build_arguments,
             )
             for reference in parsed.references:
                 if reference.kind is not ReferenceKind.UNRESOLVED or reference.resolved is None:
@@ -430,6 +455,314 @@ def _image_configuration(images: Mapping[str, ImageConfig]) -> str:
             lines.append(f"aliases = {_toml_array(image.aliases)}")
         sections.append("\n".join(lines))
     return "\n\n".join(sections)
+
+
+_RECONCILE_MARKER = "__platform_images_reconcile_marker__"
+
+
+def _toml_header_path(line: str) -> tuple[str, ...] | None:
+    stripped = line.strip()
+    if not stripped.startswith("["):
+        return None
+    try:
+        document = tomllib.loads(f"{stripped}\n{_RECONCILE_MARKER} = true\n")
+    except tomllib.TOMLDecodeError:
+        return None
+
+    def find(value: object, path: tuple[str, ...]) -> tuple[str, ...] | None:
+        if isinstance(value, dict):
+            if value.get(_RECONCILE_MARKER) is True:
+                return path
+            for key, child in value.items():
+                found = find(child, (*path, key))
+                if found is not None:
+                    return found
+        elif isinstance(value, list):
+            for child in value:
+                found = find(child, path)
+                if found is not None:
+                    return found
+        return None
+
+    return find(document, ())
+
+
+def _toml_table_range(lines: list[str], path: tuple[str, ...]) -> tuple[int, int] | None:
+    headers = [
+        (index, header_path)
+        for index, line in enumerate(lines)
+        if (header_path := _toml_header_path(line)) is not None
+    ]
+    for position, (start, header_path) in enumerate(headers):
+        if header_path == path:
+            end = headers[position + 1][0] if position + 1 < len(headers) else len(lines)
+            return start, end
+    return None
+
+
+def _toml_setting_range(
+    lines: list[str], table: tuple[int, int], key: str
+) -> tuple[int, int] | None:
+    start, end = table
+    assignment = re.compile(rf"^\s*{re.escape(key)}\s*=")
+    for setting_start in range(start + 1, end):
+        if assignment.match(lines[setting_start]) is None:
+            continue
+        for setting_end in range(setting_start + 1, end + 1):
+            candidate = "".join(lines[setting_start:setting_end])
+            try:
+                parsed = tomllib.loads(candidate)
+            except tomllib.TOMLDecodeError:
+                continue
+            if key in parsed:
+                return setting_start, setting_end
+        raise PlatformImagesError(f"unable to safely update TOML setting: {key}")
+    return None
+
+
+def _toml_path(path: tuple[str, ...]) -> str:
+    if len(path) == 2 and path[0] == "images":
+        return f"images.{json.dumps(path[1])}"
+    return ".".join(
+        component if re.fullmatch(r"[A-Za-z0-9_-]+", component) else json.dumps(component)
+        for component in path
+    )
+
+
+def _append_toml_block(text: str, block: str) -> str:
+    newline = "\r\n" if "\r\n" in text else "\n"
+    rendered = block.replace("\n", newline).rstrip("\r\n") + newline
+    if not text:
+        return rendered
+    if text.endswith(("\n\n", "\r\n\r\n")):
+        separator = ""
+    elif text.endswith(("\n", "\r\n")):
+        separator = newline
+    else:
+        separator = newline + newline
+    return text + separator + rendered
+
+
+def _set_toml_setting(text: str, path: tuple[str, ...], key: str, value: str) -> str:
+    lines = text.splitlines(keepends=True)
+    newline = "\r\n" if "\r\n" in text else "\n"
+    rendered = f"{key} = {value}\n".replace("\n", newline)
+    table = _toml_table_range(lines, path)
+    if table is None:
+        return _append_toml_block(text, f"[{_toml_path(path)}]\n{key} = {value}\n")
+
+    setting = _toml_setting_range(lines, table, key)
+    if setting is not None:
+        setting_start, setting_end = setting
+        preserved_comments: list[str] = []
+        for old_line in lines[setting_start:setting_end]:
+            _value, marker, comment = old_line.partition("#")
+            if marker:
+                indentation = old_line[: len(old_line) - len(old_line.lstrip())]
+                preserved_comments.append(f"{indentation}# {comment.strip()}{newline}")
+        lines[setting_start:setting_end] = [*preserved_comments, rendered]
+    else:
+        lines[table[0] + 1 : table[0] + 1] = [rendered]
+    return "".join(lines)
+
+
+def _identity_key(repository: str) -> str:
+    return registry_relative_repository(repository_name(repository))
+
+
+def _atomic_write_configuration(path: Path, text: str) -> None:
+    mode = stat.S_IMODE(path.stat().st_mode)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def reconcile_repository(root: Path, *, write: bool = True) -> ReconciliationResult:
+    """Merge high-confidence inferred identities into an existing configuration."""
+    root = root.resolve()
+    configuration_path = root / CONFIGURATION_NAME
+    config = RepositoryConfig.load(root)
+    with configuration_path.open("r", encoding="utf-8", newline="") as stream:
+        before = stream.read()
+    raw_configuration = tomllib.loads(before)
+    target_directories = _target_directories(root, config.discovery.roots)
+    ignored_repositories = frozenset(
+        _identity_key(repository) for repository in config.identity.external_repositories
+    )
+    policy = _infer_repository_policy(
+        target_directories,
+        config.registry.namespace,
+        namespace_explicit=True,
+        ignored_repositories=ignored_repositories,
+        build_arguments=config.dockerfile.arguments,
+    )
+
+    after = before
+    inferred_external_images = _infer_short_external_images(
+        target_directories,
+        config.registry.namespace,
+        config.dockerfile.arguments,
+    )
+    current_external_images = config.dockerfile.allowed_short_external_images - {"scratch"}
+    added_external_images = tuple(sorted(set(inferred_external_images) - current_external_images))
+    if added_external_images:
+        if (
+            "dockerfile" in raw_configuration
+            and _toml_table_range(before.splitlines(keepends=True), ("dockerfile",)) is None
+        ):
+            raise PlatformImagesError(
+                "cannot safely reconcile an inline dockerfile setting; convert it to a "
+                "[dockerfile] table"
+            )
+        merged_external_images = tuple(sorted(current_external_images | set(added_external_images)))
+        after = _set_toml_setting(
+            after,
+            ("dockerfile",),
+            "allowed_short_external_images",
+            _toml_array(merged_external_images),
+        )
+
+    inference_evidence = {(item.target, item.source_repository): item for item in policy.review}
+    applied_inferences: list[RepositoryInference] = []
+    new_image_configs: dict[str, ImageConfig] = {}
+    for target, inferred in sorted(policy.images.items()):
+        existing = config.images.get(target, ImageConfig(None, ()))
+        repository = existing.repository
+        aliases = list(existing.aliases)
+        known_identities = {
+            _identity_key(config.image_repository(target)),
+            *(_identity_key(alias) for alias in aliases),
+        }
+
+        if inferred.repository is not None:
+            inferred_key = _identity_key(inferred.repository)
+            if inferred_key not in known_identities:
+                evidence = inference_evidence[(target, inferred.repository)]
+                if repository is None:
+                    repository = inferred.repository
+                    action = "canonical repository override"
+                else:
+                    aliases.append(inferred.repository)
+                    action = "dependency alias"
+                known_identities.add(inferred_key)
+                applied_inferences.append(
+                    RepositoryInference(
+                        target,
+                        inferred.repository,
+                        action,
+                        evidence.confidence,
+                        evidence.reference_count,
+                    )
+                )
+
+        for alias in inferred.aliases:
+            alias_key = _identity_key(alias)
+            if alias_key in known_identities:
+                continue
+            evidence = inference_evidence[(target, alias)]
+            aliases.append(alias)
+            known_identities.add(alias_key)
+            applied_inferences.append(
+                RepositoryInference(
+                    target,
+                    alias,
+                    "dependency alias",
+                    evidence.confidence,
+                    evidence.reference_count,
+                )
+            )
+
+        merged = ImageConfig(repository, tuple(sorted(aliases)))
+        if merged == existing:
+            continue
+        if target not in config.images:
+            new_image_configs[target] = merged
+            continue
+        table = ("images", target)
+        if _toml_table_range(after.splitlines(keepends=True), table) is None:
+            raise PlatformImagesError(
+                f"cannot safely reconcile inline images.{target}; convert it to "
+                f"[images.{json.dumps(target)}]"
+            )
+        if merged.repository is not None and merged.repository != existing.repository:
+            after = _set_toml_setting(
+                after,
+                table,
+                "repository",
+                json.dumps(merged.repository),
+            )
+        if merged.aliases != existing.aliases:
+            after = _set_toml_setting(after, table, "aliases", _toml_array(merged.aliases))
+
+    if new_image_configs:
+        after = _append_toml_block(after, _image_configuration(new_image_configs))
+
+    diff = "".join(
+        difflib.unified_diff(
+            before.splitlines(keepends=True),
+            after.splitlines(keepends=True),
+            fromfile=f"a/{CONFIGURATION_NAME}",
+            tofile=f"b/{CONFIGURATION_NAME}",
+        )
+    )
+    changed = before != after
+    before_report = validate_repository(config)
+    result_report = before_report
+    if write and changed:
+        with configuration_path.open("r", encoding="utf-8", newline="") as stream:
+            if stream.read() != before:
+                raise PlatformImagesError(
+                    "configuration changed during reconciliation; rerun without concurrent edits"
+                )
+        _atomic_write_configuration(configuration_path, after)
+        try:
+            reconciled_config = RepositoryConfig.load(root)
+            after_report = validate_repository(reconciled_config)
+            result_report = after_report
+            existing_errors = {
+                (issue.code, issue.path, issue.line, issue.message)
+                for issue in before_report.errors
+            }
+            introduced = [
+                issue
+                for issue in after_report.errors
+                if (issue.code, issue.path, issue.line, issue.message) not in existing_errors
+            ]
+            if introduced:
+                details = "; ".join(f"[{issue.code}] {issue.message}" for issue in introduced[:3])
+                raise PlatformImagesError(
+                    "reconciliation would introduce validation errors: " + details
+                )
+        except Exception as exc:
+            _atomic_write_configuration(configuration_path, before)
+            if isinstance(exc, PlatformImagesError):
+                raise PlatformImagesError(f"{exc}; configuration was restored") from exc
+            raise PlatformImagesError(
+                f"reconciled configuration is invalid and was restored: {exc}"
+            ) from exc
+
+    return ReconciliationResult(
+        configuration_path,
+        len(target_directories),
+        changed,
+        diff,
+        added_external_images,
+        tuple(sorted(applied_inferences, key=lambda item: (item.target, item.source_repository))),
+        result_report,
+    )
 
 
 def _configuration_text(
@@ -563,12 +896,14 @@ def initialize_repository(
         target_directories,
         requested_namespace,
         namespace_explicit=namespace is not None,
+        build_arguments=selected_build_arguments,
     )
     inferred_namespace = repository_policy.namespace
     configured_namespace = inferred_namespace or requested_namespace
     external_images = _infer_short_external_images(
         target_directories,
         configured_namespace,
+        selected_build_arguments,
     )
     contents = _configuration_text(
         namespace=configured_namespace,
