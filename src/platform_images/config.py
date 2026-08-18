@@ -8,7 +8,11 @@ from pathlib import Path
 
 from platform_images.backends import default_transport, validate_execution_pair
 from platform_images.errors import ConfigurationError
-from platform_images.image_identity import registry_relative_repository, repository_name
+from platform_images.image_identity import (
+    registry_hostname,
+    registry_relative_repository,
+    repository_name,
+)
 from platform_images.models import (
     BuildBackend,
     RegistryAuthentication,
@@ -64,6 +68,8 @@ class ImageConfig:
 @dataclass(frozen=True)
 class IdentityConfig:
     external_repositories: frozenset[str]
+    internal_registries: frozenset[str]
+    managed_repository_prefixes: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -139,7 +145,14 @@ class RepositoryConfig:
             raw_dockerfile_arguments = dockerfile_data.get("arguments", {})
             if not isinstance(identity_data, dict):
                 raise TypeError("identity must be a table")
-            unexpected_identity_settings = sorted(set(identity_data) - {"external_repositories"})
+            unexpected_identity_settings = sorted(
+                set(identity_data)
+                - {
+                    "external_repositories",
+                    "internal_registries",
+                    "managed_repository_prefixes",
+                }
+            )
             if unexpected_identity_settings:
                 raise TypeError(
                     "identity contains unknown settings: " + ", ".join(unexpected_identity_settings)
@@ -149,6 +162,16 @@ class RepositoryConfig:
                 isinstance(reference, str) for reference in raw_external_repositories
             ):
                 raise TypeError("identity.external_repositories must be an array of strings")
+            raw_internal_registries = identity_data.get("internal_registries", [])
+            if not isinstance(raw_internal_registries, list) or not all(
+                isinstance(registry, str) for registry in raw_internal_registries
+            ):
+                raise TypeError("identity.internal_registries must be an array of strings")
+            raw_managed_repository_prefixes = identity_data.get("managed_repository_prefixes", [])
+            if not isinstance(raw_managed_repository_prefixes, list) or not all(
+                isinstance(prefix, str) for prefix in raw_managed_repository_prefixes
+            ):
+                raise TypeError("identity.managed_repository_prefixes must be an array of strings")
             configured_root = discovery_data.get("root")
             configured_roots = discovery_data.get("roots")
             if configured_root is not None and configured_roots is not None:
@@ -315,6 +338,46 @@ class RepositoryConfig:
             )
         if len(raw_external_repositories) != len(set(raw_external_repositories)):
             raise ConfigurationError("identity.external_repositories must be unique")
+        invalid_internal_registries = sorted(
+            registry
+            for registry in raw_internal_registries
+            if not registry
+            or registry != registry.casefold()
+            or "/" in registry
+            or "://" in registry
+            or any(character.isspace() for character in registry)
+            or registry_hostname(f"{registry}/probe") != registry
+        )
+        if invalid_internal_registries:
+            raise ConfigurationError(
+                "identity.internal_registries must contain lowercase registry hostnames "
+                "without schemes or paths: " + ", ".join(invalid_internal_registries)
+            )
+        if len(raw_internal_registries) != len(set(raw_internal_registries)):
+            raise ConfigurationError("identity.internal_registries must be unique")
+        internal_registries = frozenset(raw_internal_registries)
+        invalid_managed_prefixes = sorted(
+            prefix
+            for prefix in raw_managed_repository_prefixes
+            if not prefix
+            or prefix != prefix.casefold()
+            or "://" in prefix
+            or "@" in prefix
+            or any(character.isspace() for character in prefix)
+            or repository_name(prefix) != prefix
+            or not IMAGE_ALIAS_RE.fullmatch(prefix)
+            or registry_hostname(prefix) is None
+            or registry_relative_repository(prefix) == prefix
+            or registry_hostname(prefix) not in internal_registries
+        )
+        if invalid_managed_prefixes:
+            raise ConfigurationError(
+                "identity.managed_repository_prefixes must contain lowercase, tagless "
+                "repository paths beneath identity.internal_registries: "
+                + ", ".join(invalid_managed_prefixes)
+            )
+        if len(raw_managed_repository_prefixes) != len(set(raw_managed_repository_prefixes)):
+            raise ConfigurationError("identity.managed_repository_prefixes must be unique")
         invalid_dockerfile_arguments = sorted(
             name
             for name, value in raw_dockerfile_arguments.items()
@@ -388,7 +451,11 @@ class RepositoryConfig:
                 dict(sorted(raw_dockerfile_arguments.items())),
             ),
             images=dict(sorted(images.items())),
-            identity=IdentityConfig(frozenset(raw_external_repositories)),
+            identity=IdentityConfig(
+                frozenset(raw_external_repositories),
+                internal_registries,
+                tuple(sorted(raw_managed_repository_prefixes)),
+            ),
             discovery=DiscoveryConfig(normalized_roots),
             build=BuildConfig(backend),
         )

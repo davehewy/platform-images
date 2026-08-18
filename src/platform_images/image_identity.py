@@ -21,6 +21,22 @@ def registry_relative_repository(reference: str) -> str:
     return remainder if registry_qualified else repository
 
 
+def registry_hostname(reference: str) -> str | None:
+    """Return an explicit Docker-style registry hostname, including an optional port."""
+    repository = repository_name(reference)
+    first, separator, _remainder = repository.partition("/")
+    if separator and (first == "localhost" or "." in first or ":" in first):
+        return first
+    return None
+
+
+def repository_is_within(reference: str, prefix: str) -> bool:
+    """Return whether a repository is the prefix itself or one of its descendants."""
+    repository = repository_name(reference)
+    normalized_prefix = repository_name(prefix).rstrip("/")
+    return repository == normalized_prefix or repository.startswith(f"{normalized_prefix}/")
+
+
 def compact_image_name(value: str) -> str:
     """Return the separator-insensitive key used for strong image-name comparisons."""
     return "".join(character for character in value.casefold() if character.isalnum())
@@ -50,6 +66,8 @@ class ImageIdentityResolver:
     managed_prefixes: frozenset[str]
     target_names: frozenset[str]
     external_repositories: frozenset[str]
+    internal_registries: frozenset[str]
+    managed_source_prefixes: frozenset[str]
     _probable_matches_cache: dict[str, tuple[tuple[str, float], ...]] = field(
         default_factory=dict,
         init=False,
@@ -105,11 +123,24 @@ class ImageIdentityResolver:
     def is_managed(self, reference: str) -> bool:
         repository = repository_name(reference)
         relative = registry_relative_repository(repository)
-        return any(
+        automatically_managed = any(
             candidate.startswith(f"{prefix}/")
             for candidate in {repository, relative}
             for prefix in self.managed_prefixes
         )
+        explicitly_managed = self.is_managed_source(repository)
+        return automatically_managed or explicitly_managed
+
+    def is_managed_source(self, reference: str) -> bool:
+        """Return whether a source is beneath an explicitly owned registry prefix."""
+        repository = repository_name(reference)
+        return any(
+            repository_is_within(repository, prefix) for prefix in self.managed_source_prefixes
+        )
+
+    def is_internal_registry(self, reference: str) -> bool:
+        """Return whether the source explicitly names a configured internal registry."""
+        return registry_hostname(reference) in self.internal_registries
 
     @property
     def collisions(self) -> Mapping[str, frozenset[str]]:
@@ -125,6 +156,8 @@ def build_image_identity_resolver(
     repositories: Mapping[str, str] | None = None,
     aliases: Mapping[str, tuple[str, ...]] | None = None,
     external_repositories: Iterable[str] = (),
+    internal_registries: Iterable[str] = (),
+    managed_repository_prefixes: Iterable[str] = (),
 ) -> ImageIdentityResolver:
     targets = frozenset(target_names)
     configured_repositories = repositories or {}
@@ -152,4 +185,6 @@ def build_image_identity_resolver(
         frozenset(managed_prefixes),
         targets,
         frozenset(repository_name(reference) for reference in external_repositories),
+        frozenset(internal_registries),
+        frozenset(repository_name(prefix) for prefix in managed_repository_prefixes),
     )

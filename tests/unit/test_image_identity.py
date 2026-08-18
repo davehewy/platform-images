@@ -112,3 +112,19 @@ def test_resolver_exposes_identity_collisions_without_guessing() -> None:
     )
 
     assert resolver.collisions["gitlab/base"] == {"base", "legacy"}
+
+
+def test_resolver_distinguishes_internal_registry_from_owned_repository_prefix() -> None:
+    resolver = build_image_identity_resolver(
+        {"base"},
+        "published/team",
+        internal_registries={"nexus.internal:8088"},
+        managed_repository_prefixes={
+            "nexus.internal:8088/some-repo/sub-repo",
+        },
+    )
+
+    assert resolver.is_internal_registry("nexus.internal:8088/unrelated/vendor-image:v1")
+    assert resolver.is_managed("nexus.internal:8088/some-repo/sub-repo/not-discovered:v1")
+    assert not resolver.is_managed("nexus.internal:8088/unrelated/not-discovered:v1")
+    assert not resolver.is_internal_registry("docker.io/library/alpine:3.22")

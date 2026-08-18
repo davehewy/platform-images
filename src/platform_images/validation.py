@@ -11,6 +11,7 @@ from platform_images.discovery import inspect_targets, valid_target_name
 from platform_images.graph import ImageGraph, build_graph
 from platform_images.image_identity import (
     build_image_identity_resolver,
+    registry_hostname,
     registry_relative_repository,
     repository_name,
 )
@@ -120,6 +121,8 @@ def validate_repository(config: RepositoryConfig) -> ValidationReport:
         repositories={name: config.image_repository(name) for name in targets},
         aliases={name: config.image_aliases(name) for name in targets},
         external_repositories=config.identity.external_repositories,
+        internal_registries=config.identity.internal_registries,
+        managed_repository_prefixes=config.identity.managed_repository_prefixes,
     )
     graph = build_graph(targets, config)
     issues: list[ValidationIssue] = []
@@ -230,6 +233,10 @@ def validate_repository(config: RepositoryConfig) -> ValidationReport:
         tuple[str, tuple[str, ...]],
         list[tuple[str, int, str]],
     ] = {}
+    missing_internal_references: dict[
+        str,
+        list[tuple[str, tuple[str, ...], str, int, str]],
+    ] = {}
     for target_name in sorted(targets):
         target = targets[target_name]
         dockerfile_path = _relative(target.dockerfile, root)
@@ -267,22 +274,14 @@ def validate_repository(config: RepositoryConfig) -> ValidationReport:
             )
             if internal:
                 matches = image_identities.probable_local_targets(reference.resolved)
-                issues.append(
-                    ValidationIssue(
-                        "missing-internal-target",
-                        "error",
-                        f"internal image target does not exist: {reference.raw}",
+                registry_group = registry_hostname(reference.resolved) or config.registry.namespace
+                missing_internal_references.setdefault(registry_group, []).append(
+                    (
+                        repository_name(reference.resolved),
+                        matches,
                         dockerfile_path,
                         reference.line_number,
-                        (
-                            _internal_reference_hint(
-                                reference.resolved,
-                                matches[0],
-                                config.image_repository(matches[0]),
-                            )
-                            if matches
-                            else None
-                        ),
+                        reference.raw,
                     )
                 )
             elif reference.resolved is not None and "/" not in reference.resolved.split("@", 1)[0]:
@@ -350,6 +349,52 @@ def validate_repository(config: RepositoryConfig) -> ValidationReport:
                         reference.line_number,
                     )
                 )
+
+    for registry_group, references in sorted(missing_internal_references.items()):
+        by_repository: dict[
+            str,
+            tuple[tuple[str, ...], str, int, str],
+        ] = {}
+        for repository, matches, path, line, raw in sorted(references):
+            by_repository.setdefault(repository, (matches, path, line, raw))
+        first_repository = next(iter(by_repository))
+        first_matches, first_path, first_line, first_raw = by_repository[first_repository]
+        if len(by_repository) == 1:
+            message = f"internal image target does not exist: {first_raw}"
+            hint = (
+                _internal_reference_hint(
+                    first_repository,
+                    first_matches[0],
+                    config.image_repository(first_matches[0]),
+                )
+                if first_matches
+                else None
+            )
+        else:
+            descriptions = []
+            for repository, (matches, _path, _line, _raw) in by_repository.items():
+                candidate = matches[0] if matches else "no unique candidate"
+                descriptions.append(f"{repository} -> {candidate}")
+            message = (
+                f"internal registry or namespace {registry_group!r} has "
+                f"{len(by_repository)} unresolved repository identities across "
+                f"{len(references)} references: " + "; ".join(descriptions)
+            )
+            hint = (
+                "during initial adoption use 'platform init --interactive'; for an existing "
+                "configuration, add one confirmed images.<target>.alias per exceptional name or "
+                "mark genuinely external repositories under [identity]"
+            )
+        issues.append(
+            ValidationIssue(
+                "missing-internal-target",
+                "error",
+                message,
+                first_path,
+                first_line,
+                hint,
+            )
+        )
 
     for (repository, matches), references in sorted(probable_references.items()):
         path, line, raw = sorted(references)[0]

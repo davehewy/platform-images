@@ -24,7 +24,13 @@ from platform_images.changes import (
 )
 from platform_images.config import RepositoryConfig
 from platform_images.errors import PlatformImagesError
-from platform_images.initialization import initialize_repository, reconcile_repository
+from platform_images.initialization import (
+    AmbiguousRepository,
+    RegistryAdoption,
+    RepositoryInference,
+    initialize_repository,
+    reconcile_repository,
+)
 from platform_images.manifests import (
     build_manifest_data,
     load_build_manifest,
@@ -40,6 +46,7 @@ from platform_images.models import (
     RegistryProvider,
     RegistryTransport,
 )
+from platform_images.normalization import normalize_internal_references
 from platform_images.planner import (
     affected_reasons,
     all_ci_plan,
@@ -186,6 +193,27 @@ examples:
         metavar="NAME=VALUE",
         help="checked-in Dockerfile ARG value used for graphing and builds; repeat as needed",
     )
+    init_mode = init.add_mutually_exclusive_group()
+    init_mode.add_argument(
+        "--interactive",
+        action="store_true",
+        help="review inferred registries, mappings, and ambiguous references step by step",
+    )
+    init_mode.add_argument(
+        "--yes",
+        action="store_true",
+        help="accept every high-confidence recommendation without prompting (the default)",
+    )
+    init_mode.add_argument(
+        "--check",
+        action="store_true",
+        help="calculate and validate the recommended configuration without writing it",
+    )
+    init.add_argument(
+        "--report-json",
+        type=Path,
+        help="write the complete adoption evidence and validation result as JSON",
+    )
 
     reconcile = root_subparsers.add_parser(
         "reconcile",
@@ -273,6 +301,32 @@ Run 'platform images COMMAND --help' for command-specific options.
         "--ascii",
         action="store_true",
         help="use portable ASCII tree connectors instead of Unicode line drawing",
+    )
+
+    normalize = commands.add_parser(
+        "normalize-references",
+        help="preview or apply qualified internal references as short logical target names",
+        description=(
+            "Rewrite only registry-qualified image operands that already resolve to local targets "
+            "through identity.internal_registries. The default is a non-writing diff preview."
+        ),
+        epilog="""\
+examples:
+  platform images normalize-references
+  platform images normalize-references --check
+  platform images normalize-references --apply
+""",
+    )
+    normalize_mode = normalize.add_mutually_exclusive_group()
+    normalize_mode.add_argument(
+        "--apply",
+        action="store_true",
+        help="apply the displayed changes atomically and revalidate the repository",
+    )
+    normalize_mode.add_argument(
+        "--check",
+        action="store_true",
+        help="do not write and return a failure status when normalization is available",
     )
 
     build = commands.add_parser(
@@ -550,6 +604,84 @@ def _root(arguments: argparse.Namespace, cwd: Path | None) -> Path:
     return Path(configured).resolve() if configured else (cwd or Path.cwd()).resolve()
 
 
+def _confirm(prompt: str, *, default: bool = True) -> bool:
+    suffix = " [Y/n] " if default else " [y/N] "
+    while True:
+        try:
+            answer = input(prompt + suffix).strip().casefold()
+        except (EOFError, KeyboardInterrupt) as exc:
+            raise PlatformImagesError("interactive initialization was cancelled") from exc
+        if not answer:
+            return default
+        if answer in {"y", "yes"}:
+            return True
+        if answer in {"n", "no"}:
+            return False
+        print("Please answer yes or no.")
+
+
+def _review_registry(adoption: RegistryAdoption) -> bool:
+    print()
+    print(f"Probable internal registry: {adoption.registry}")
+    print(
+        f"  {adoption.local_reference_count}/{adoption.reference_count} qualified references "
+        f"match {adoption.local_target_count} discovered local targets"
+    )
+    if adoption.unmatched_reference_count:
+        print(f"  {adoption.unmatched_reference_count} references remain external or need review")
+    if adoption.managed_prefixes:
+        print("  Recommended managed repository prefixes:")
+        for prefix in adoption.managed_prefixes:
+            print(f"    - {prefix}")
+    return _confirm("Accept this grouped registry recommendation?")
+
+
+def _review_inferences(inferences: tuple[RepositoryInference, ...]) -> bool:
+    print()
+    print(f"High-confidence local repository mappings ({len(inferences)}):")
+    for inference in inferences:
+        print(
+            f"  - {inference.source_repository} -> {inference.target} "
+            f"({inference.confidence}; {inference.reference_count} references)"
+        )
+    return _confirm("Apply these mappings?")
+
+
+def _review_ambiguity(ambiguity: AmbiguousRepository) -> str | None:
+    print()
+    print(
+        f"Qualified repository needing review ({ambiguity.reference_count} references):\n"
+        f"  {ambiguity.repository}"
+    )
+    for index, target in enumerate(ambiguity.candidates, 1):
+        print(f"  {index}. Map to local target {target}")
+    external_index = len(ambiguity.candidates) + 1
+    unresolved_index = external_index + 1
+    print(f"  {external_index}. Treat as external")
+    print(f"  {unresolved_index}. Leave unresolved for later review")
+    while True:
+        try:
+            answer = input(
+                f"Selection [1-{unresolved_index}, default {unresolved_index}]: "
+            ).strip()
+        except (EOFError, KeyboardInterrupt) as exc:
+            raise PlatformImagesError("interactive initialization was cancelled") from exc
+        if not answer:
+            return None
+        try:
+            selected = int(answer)
+        except ValueError:
+            print("Enter one of the numbered choices.")
+            continue
+        if 1 <= selected <= len(ambiguity.candidates):
+            return ambiguity.candidates[selected - 1]
+        if selected == external_index:
+            return "external"
+        if selected == unresolved_index:
+            return None
+        print("Enter one of the numbered choices.")
+
+
 def _run_init(arguments: argparse.Namespace, cwd: Path | None) -> int:
     root = _root(arguments, cwd)
     result = initialize_repository(
@@ -571,13 +703,20 @@ def _run_init(arguments: argparse.Namespace, cwd: Path | None) -> int:
         registry_username_environment_variable=arguments.registry_username_variable,
         registry_password_environment_variable=arguments.registry_password_variable,
         build_arguments=parse_build_arguments(arguments.build_arg),
+        registry_decider=_review_registry if arguments.interactive else None,
+        inference_decider=_review_inferences if arguments.interactive else None,
+        ambiguous_decider=_review_ambiguity if arguments.interactive else None,
+        write=not arguments.check,
     )
-    config = RepositoryConfig.load(root)
-    report = validate_repository(config)
+    report = result.validation_report
     relative_configuration = result.configuration_path.relative_to(root).as_posix()
     target_word = "target" if result.target_count == 1 else "targets"
     root_word = "root" if len(result.discovery_roots) == 1 else "roots"
-    print(f"Created {relative_configuration}")
+    print(
+        f"Would create {relative_configuration}"
+        if arguments.check
+        else f"Created {relative_configuration}"
+    )
     print(
         f"Discovered {result.target_count} image {target_word} across "
         f"{len(result.discovery_roots)} {root_word}:"
@@ -596,8 +735,18 @@ def _run_init(arguments: argparse.Namespace, cwd: Path | None) -> int:
         )
         print(
             "They resolve automatically; build outputs use registry namespace: "
-            f"{config.registry.namespace}"
+            f"{result.registry_namespace}"
         )
+    if result.registry_adoptions:
+        print("Internal registry adoption summary:")
+        for adoption in result.registry_adoptions:
+            print(
+                f"  - {adoption.registry}: {adoption.local_reference_count}/"
+                f"{adoption.reference_count} references matched "
+                f"{adoption.local_target_count} local targets"
+            )
+            for prefix in adoption.managed_prefixes:
+                print(f"    managed prefix: {prefix}")
     if result.repository_inferences:
         guess_word = "mapping" if len(result.repository_inferences) == 1 else "mappings"
         print(
@@ -619,6 +768,16 @@ def _run_init(arguments: argparse.Namespace, cwd: Path | None) -> int:
         print("Allowed short external images inferred from build files:")
         for image in result.allowed_short_external_images:
             print(f"  - {image}")
+    if result.external_repositories:
+        print("Confirmed external repositories:")
+        for repository in result.external_repositories:
+            print(f"  - {repository}")
+    if result.ambiguous_repositories:
+        count = len(result.ambiguous_repositories)
+        print(f"Review required for {count} ambiguous qualified repositories:")
+        for ambiguity in result.ambiguous_repositories:
+            print(f"  - {ambiguity.repository} -> " + ", ".join(ambiguity.candidates))
+        print("Run 'platform reconcile' after adding an explicit alias or external exception.")
     if report.valid:
         print(f"Initial validation passed ({result.target_count} image {target_word}).")
         if report.warnings:
@@ -632,6 +791,61 @@ def _run_init(arguments: argparse.Namespace, cwd: Path | None) -> int:
         error_word = "error" if len(report.errors) == 1 else "errors"
         print(f"Initial validation found {len(report.errors)} {error_word}.")
         print("Next: platform images validate")
+    if arguments.report_json is not None:
+        report_path = _artifact_path(arguments.report_json, root)
+        try:
+            report_path.resolve().relative_to(root)
+        except ValueError as exc:
+            raise PlatformImagesError("init report output must stay within the repository") from exc
+        write_json_file(
+            report_path,
+            {
+                "schema_version": 1,
+                "configuration": relative_configuration,
+                "target_count": result.target_count,
+                "discovery_roots": list(result.discovery_roots),
+                "registry_namespace": result.registry_namespace,
+                "registry_adoptions": [
+                    {
+                        "registry": adoption.registry,
+                        "managed_prefixes": list(adoption.managed_prefixes),
+                        "reference_count": adoption.reference_count,
+                        "local_reference_count": adoption.local_reference_count,
+                        "local_target_count": adoption.local_target_count,
+                        "unmatched_reference_count": adoption.unmatched_reference_count,
+                    }
+                    for adoption in result.registry_adoptions
+                ],
+                "repository_mappings": [
+                    {
+                        "target": inference.target,
+                        "source_repository": inference.source_repository,
+                        "action": inference.action,
+                        "confidence": inference.confidence,
+                        "reference_count": inference.reference_count,
+                    }
+                    for inference in result.repository_inferences
+                ],
+                "ambiguous_repositories": [
+                    {
+                        "repository": ambiguity.repository,
+                        "normalized_repository": ambiguity.normalized_repository,
+                        "candidates": list(ambiguity.candidates),
+                        "reference_count": ambiguity.reference_count,
+                    }
+                    for ambiguity in result.ambiguous_repositories
+                ],
+                "validation": {
+                    "valid": report.valid,
+                    "errors": [issue.code for issue in report.errors],
+                    "warnings": [issue.code for issue in report.warnings],
+                },
+            },
+        )
+        print(f"Wrote adoption report: {report_path.relative_to(root).as_posix()}")
+    if arguments.check:
+        print("Run 'platform init' to write this validated recommendation.")
+        return 1
     return 0
 
 
@@ -662,6 +876,16 @@ def _run_reconcile(arguments: argparse.Namespace, cwd: Path | None) -> int:
                     f"({inference.confidence}, {inference.reference_count} {reference_word}; "
                     f"{inference.action})"
                 )
+        if result.registry_adoptions:
+            print("Added grouped internal registry policy:")
+            for adoption in result.registry_adoptions:
+                print(
+                    f"  - {adoption.registry}: {adoption.local_reference_count}/"
+                    f"{adoption.reference_count} references matched "
+                    f"{adoption.local_target_count} local targets"
+                )
+                for prefix in adoption.managed_prefixes:
+                    print(f"    managed prefix: {prefix}")
         print()
         print(result.diff, end="" if result.diff.endswith("\n") else "\n")
         if arguments.check:
@@ -1023,6 +1247,25 @@ def _run(arguments: argparse.Namespace, cwd: Path | None, environment: Mapping[s
             if arguments.format == "json"
             else render_graph_text(graph, ascii_only=arguments.ascii or sys.platform == "win32")
         )
+        return 0
+    if arguments.command == "normalize-references":
+        result = normalize_internal_references(config, write=arguments.apply)
+        if result.changed:
+            print(result.diff, end="" if result.diff.endswith("\n") else "\n")
+            if arguments.apply:
+                file_word = "file" if len(result.files) == 1 else "files"
+                print(
+                    f"Normalized qualified local references in {len(result.files)} build "
+                    f"{file_word}."
+                )
+                print("Validation passed after normalization.")
+            elif arguments.check:
+                print("Run 'platform images normalize-references --apply' to apply this diff.")
+                return 1
+            else:
+                print("Preview only; use --apply to write these changes.")
+        else:
+            print("Internal local references are already normalized.")
         return 0
     if arguments.command == "build":
         if arguments.name not in graph.targets:

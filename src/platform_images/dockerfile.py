@@ -194,6 +194,15 @@ def _classify(
         )
     if image_identities.is_explicit_external(repository):
         return ImageReference(raw, resolved, instruction, line_number, ReferenceKind.EXTERNAL_IMAGE)
+    if (
+        image_identities.is_internal_registry(repository)
+        and not image_identities.is_managed_source(repository)
+        and not image_identities.probable_local_targets(repository)
+    ):
+        # Shared internal registries commonly contain both repository-owned images and remote-only
+        # vendor bases. A configured output namespace alone must not turn every unmatched image on
+        # that host into a missing local target.
+        return ImageReference(raw, resolved, instruction, line_number, ReferenceKind.EXTERNAL_IMAGE)
     if candidates or image_identities.is_managed(repository):
         return ImageReference(raw, resolved, instruction, line_number, ReferenceKind.UNRESOLVED)
     if "/" not in repository and repository not in allowed_short_external_images:

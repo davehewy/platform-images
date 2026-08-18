@@ -237,6 +237,27 @@ to the same repository, and prints one review warning per inferred mapping. Genu
 unmapped. It never moves an image, assumes a fixed root name, or overwrites an existing
 configuration.
 
+Before writing anything, inspect the exact recommendation in automation with:
+
+```bash
+platform init --check --report-json platform-init-report.json
+```
+
+`--check` temporarily validates the complete candidate and leaves no configuration behind. It
+returns status 1 while initialization is required; the JSON report records grouped registry
+evidence, mappings, unresolved ambiguity, and validation codes. For a repository with mixed
+qualified references on a shared Nexus, use the guided terminal flow:
+
+```bash
+platform init --interactive
+```
+
+The assistant groups references by registry host and repository path, proposes one internal
+registry policy, applies all unique high-confidence local mappings as a batch, and asks only about
+genuine collisions. A Nexus host may contain both repository-owned and vendor images: declaring it
+internal does not make every stored image local. A managed prefix is inferred only when all
+observed repositories beneath that exact prefix match discovered targets.
+
 If auto-discovery is intentionally broader than the ownership areas you want, name each existing
 target parent directory explicitly. The directories can be anywhere beneath the repository:
 
@@ -353,6 +374,27 @@ those hosts in configuration. An unmatched qualified source remains external. Th
 an exact final-component match during ordinary graph construction; it never makes a fuzzy graph
 edge at build time. `platform init` may make a reviewed best guess, but records that decision as an
 exact repository or alias mapping before validating the graph.
+
+When many local-looking references share an internal registry, `init` records the grouped evidence
+instead of emitting the same finding for every Dockerfile:
+
+```toml
+[identity]
+internal_registries = [
+  "nexus.internal:8088",
+]
+managed_repository_prefixes = [
+  "nexus.internal:8088/some-repo/sub-repo",
+]
+```
+
+The hostname includes an optional port but never a URL scheme. Managed prefixes are fully
+qualified, tagless source paths and must belong to a declared internal registry. Unmatched images
+on a shared internal host remain ordinary external bases unless they are beneath an explicitly
+managed prefix or resemble a local target. `init` never auto-adopts well-known shared public hosts
+such as Docker Hub, GHCR, Quay, MCR, or the Kubernetes registry as internal. If your team
+intentionally publishes repository-owned images to one of them, opt in explicitly here and review
+the proposed graph before normalizing source references.
 
 The same rule applies when the reference is assembled through a build argument:
 
@@ -500,6 +542,20 @@ external_repositories = [
   "docker.io/vendor/ubuntu24-base",
 ]
 ```
+
+After the exact graph validates, optionally preview simpler checked-in local references:
+
+```bash
+platform images normalize-references
+platform images normalize-references --apply
+```
+
+The command only changes image operands already proven to be local and hosted by an
+`identity.internal_registries` entry. It leaves external images, ARG-composed sources, heredocs,
+and other Dockerfile text untouched, writes atomically, and restores every file if validation
+regresses. The default is a diff-only preview; `--check` is suitable for enforcing an agreed
+normalization policy in CI. Short logical references require builds to receive the named contexts
+provided by `platform-images`, so source rewriting is never part of automatic initialization.
 
 During a registry migration, list old repository identities as tagless aliases:
 
@@ -1299,14 +1355,17 @@ platform init
 Use this when adopting the tool in an existing repository: it derives discovery roots from the
 locations of existing build files, infers unqualified external base names, consolidates a common
 qualified local-image path into one cascading output namespace, applies unique high-confidence
-remote-to-local repository matches, and validates the resulting exact graph. Pass repeatable
+remote-to-local repository matches, groups shared internal-registry evidence, and validates the
+resulting exact graph. Use `--interactive` to decide genuine ambiguity step by step, or combine
+`--check` with `--report-json <path>` to validate and export the complete proposal without writing
+configuration. Pass repeatable
 `--discovery-root` options when you want to declare ownership areas explicitly, `--namespace` when
 the registry hierarchy differs from the repository name, and `--builder` when Docker is not the
 right default. The command refuses to replace `platform-images.toml`; configuration changes after
 initialization can use `platform reconcile` for additive high-confidence updates while retaining
 the existing namespace, output overrides, discovery roots, unrelated settings, and comments. It
 prints a reviewable diff and inference audit; genuine ambiguities remain grouped warnings. Use
-`--check` to enforce that drift in CI. Namespace changes, output redirection, discovery ownership
+`platform reconcile --check` to enforce that drift in CI. Namespace changes, output redirection, discovery ownership
 changes, and removal of old mappings remain ordinary reviewed source changes.
 
 Bake export deliberately adds no second configuration table. `generate-bake` consumes the same
@@ -1429,6 +1488,8 @@ allowing a handful of real exceptions. Repeated consumers never require repeated
 | --- | --- | --- |
 | `images.<target>.repository` | Exceptional registry-relative output repository and canonical qualified dependency identity. It must not contain a registry hostname, tag, or digest. | Use only when this target's pushed name differs from the global `<registry.namespace>/<target>` convention, including when the remote basename differs from the logical target. |
 | `images.<target>.aliases` | Exceptional tagless full or registry-relative repositories that resolve to this logical target. Aliases are inputs only. | Use when a remote basename differs from the logical target or during a rename. Exact-basename qualified references need no alias. |
+| `identity.internal_registries` | Shared internal registry hostnames, with optional ports and without schemes or paths. This is an adoption and diagnostic signal, not a claim that every image on the host is locally owned. | Let `init` infer this when several qualified references match discovered targets. Set it manually when a known Nexus, Harbor, or similar registry mixes repository-owned and external images. |
+| `identity.managed_repository_prefixes` | Fully qualified, tagless source paths beneath an internal registry whose observed repositories are expected to be locally owned. | Normally accept the prefix inferred by `init`. Add one manually only when an unmatched name beneath it should be treated as a missing local target rather than an external image. Every prefix must belong to `internal_registries`. |
 | `identity.external_repositories` | Tagless qualified or registry-relative repositories that must remain external. | Use only for a genuine name collision or to acknowledge a `probable-local-reference` warning. Ordinary private and public external images need no entry. |
 
 The registry host remains an environment or CI concern. For example, configure
@@ -1614,12 +1675,13 @@ job, deploy, or robot-account tokens over personal long-lived passwords.
 | Command | Typical use |
 | --- | --- |
 | `platform version [--format json]` | Print the installed release without requiring a configured repository. `platform --version` is the shorter equivalent. |
-| `platform init [--discovery-root <path> ...] [--namespace <name>] [--builder <name>] [--registry-provider oci\|ecr] [--build-arg NAME=VALUE ...]` | Safely create `platform-images.toml` by inferring target groups and a minimal cascading repository policy. Applies strong unique mappings with a review audit and refuses to overwrite existing configuration. |
+| `platform init [--interactive\|--yes\|--check] [--report-json <path>] [--discovery-root <path> ...] [--namespace <name>] [--builder <name>]` | Infer target groups, internal registry policy, and the smallest exact mapping set. Interactive mode asks only about ambiguity; check mode validates the complete proposal without writing it. |
 | `platform reconcile [--check]` | Add safe external-base and repository-identity updates to an existing configuration, print the exact diff, and validate or roll back. `--check` detects drift without writing. |
 | `platform images list` | Inventory discovered image targets. |
 | `platform images show <name>` | Inspect one target's build file, output repository, aliases, dependencies, exact source-to-target bindings, and dependents. |
 | `platform images validate` | Gate commits before planning or building. |
 | `platform images graph [--format json] [--ascii]` | Review or export the complete dependency graph. Text output is always a visibly connected tree; `--ascii` replaces Unicode line drawing for limited terminals. |
+| `platform images normalize-references [--check\|--apply]` | Preview or atomically replace proven qualified internal image operands with their logical local target names. External and ARG-composed sources remain untouched. |
 | `platform images build <name> [--dry-run] [--no-deps] [--builder <name>]` | Build locally with deterministic dependency binding using the configured or selected backend. |
 | `platform images changed --base <sha> --head <sha>` | Show directly changed targets and removed target directories. |
 | `platform images affected --base <sha> --head <sha>` | Show the topologically ordered downstream rebuild set. |

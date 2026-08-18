@@ -15,8 +15,10 @@ package makes repository conventions explicit and testable.
    target before reading configured global `ARG` values, Dockerfile defaults, `FROM`,
    `COPY`/`ADD --from`, and
    `RUN --mount=from`. Tags and digests do not determine identity, while the exact expanded source
-   spelling is retained for build-context replacement. Explicit external exceptions win over
-   automatic basename inference; heredoc bodies remain excluded.
+   spelling is retained for build-context replacement. Internal registry hosts are distinct from
+   fully managed repository prefixes, allowing a shared Nexus to contain both local and external
+   images without false missing-target errors. Explicit external exceptions win over automatic
+   basename inference; heredoc bodies remain excluded.
 3. **Graph** is authoritative as `dependencies[consumer]` and `dependents[input]`. JSON is the
    machine contract. The human tree retains every incoming edge, expands each target subtree once,
    and marks later multi-parent occurrences as already shown, keeping output `O(V + E)`.
@@ -47,9 +49,10 @@ package makes repository conventions explicit and testable.
     parents become native `target:` contexts, parents outside a partial plan remain digest-pinned
     `docker-image://` contexts, and ARG-bound image operands use the executor's narrow Dockerfile
     rewrite without modifying source files.
-12. **Configuration reconciler** reruns adoption inference inside configured roots, merges only
-    high-confidence additive identity policy, writes atomically, and restores the original file if
-    a proposed mapping introduces a new graph error.
+12. **Configuration reconciler** reruns adoption inference inside configured roots, consolidates
+   registry evidence, merges only high-confidence additive identity policy, writes atomically, and
+   restores the original file if a proposed mapping introduces a new graph error. Initialization
+   can validate the complete proposal without writing or ask only about unresolved collisions.
 13. **Manifest verifier** joins per-target results only when their commit, source, output, digest,
     dependency inputs, and expected target set agree with the plan. The resulting JSON is the
     downstream and release bill of materials.

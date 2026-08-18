@@ -215,6 +215,23 @@ def test_init_refuses_to_overwrite_configuration(tmp_path: Path, capsys) -> None
     assert "refusing to overwrite" in capsys.readouterr().err
 
 
+def test_init_check_validates_recommendation_without_writing_configuration(
+    tmp_path: Path, capsys
+) -> None:
+    root = tmp_path / "repository"
+    target = root / "containers" / "base"
+    target.mkdir(parents=True)
+    (target / "Dockerfile").write_text("FROM alpine:3.22\n", encoding="utf-8")
+
+    assert main(["init", "--check"], cwd=root, environment={}) == 1
+
+    assert not (root / "platform-images.toml").exists()
+    output = capsys.readouterr().out
+    assert "Would create platform-images.toml" in output
+    assert "Initial validation passed" in output
+    assert "Run 'platform init' to write this validated recommendation." in output
+
+
 def test_init_without_an_inferable_layout_explains_explicit_roots(tmp_path: Path, capsys) -> None:
     root = tmp_path / "repository"
     root.mkdir()
@@ -552,6 +569,34 @@ def test_init_accepts_multiple_source_registries_without_per_image_inventory(
     assert "build outputs use registry namespace: repository" in output
 
 
+def test_init_never_auto_adopts_a_shared_public_registry_as_internal(
+    tmp_path: Path, capsys
+) -> None:
+    root = tmp_path / "repository"
+    targets = root / "containers"
+    base = targets / "base"
+    base.mkdir(parents=True)
+    (base / "Dockerfile").write_text("FROM alpine:3.22\n", encoding="utf-8")
+    for index in range(3):
+        consumer = targets / f"consumer-{index}"
+        consumer.mkdir(parents=True)
+        (consumer / "Dockerfile").write_text(
+            "FROM ghcr.io/acme/base:latest\n",
+            encoding="utf-8",
+        )
+
+    assert main(["init"], cwd=root, environment={}) == 0
+
+    config = RepositoryConfig.load(root)
+    assert not config.identity.internal_registries
+    report = validate_repository(config)
+    assert report.valid
+    assert all(
+        report.graph.direct_dependencies(f"consumer-{index}") == ("base",) for index in range(3)
+    )
+    assert "Internal registry adoption summary:" not in capsys.readouterr().out
+
+
 def test_init_rejects_repository_root_build_file(tmp_path: Path, capsys) -> None:
     root = tmp_path / "repository"
     root.mkdir()
@@ -561,6 +606,128 @@ def test_init_rejects_repository_root_build_file(tmp_path: Path, capsys) -> None
 
     assert not (root / "platform-images.toml").exists()
     assert "repository-root Dockerfile" in capsys.readouterr().err
+
+
+def test_init_adopts_deep_internal_nexus_namespace_as_one_cascading_policy(
+    tmp_path: Path, capsys
+) -> None:
+    root = tmp_path / "repository"
+    targets = root / "containers"
+    for name, dockerfile in {
+        "base": "FROM alpine:3.22\n",
+        "tooling": "FROM alpine:3.22\n",
+        "application": (
+            "FROM nexus.internal:8088/some-repo/sub-repo/base:v1.1\n"
+            "COPY --from=nexus.internal:8088/some-repo/sub-repo/tooling:v2 "
+            "/tool /tool\n"
+        ),
+    }.items():
+        directory = targets / name
+        directory.mkdir(parents=True)
+        (directory / "Dockerfile").write_text(dockerfile, encoding="utf-8")
+
+    assert (
+        main(
+            ["init", "--report-json", "platform-init-report.json"],
+            cwd=root,
+            environment={},
+        )
+        == 0
+    )
+
+    config = RepositoryConfig.load(root)
+    assert config.registry.namespace == "some-repo/sub-repo"
+    assert config.identity.internal_registries == {"nexus.internal:8088"}
+    assert config.identity.managed_repository_prefixes == (
+        "nexus.internal:8088/some-repo/sub-repo",
+    )
+    report = validate_repository(config)
+    assert report.valid
+    assert report.graph.direct_dependencies("application") == ("base", "tooling")
+    output = capsys.readouterr().out
+    assert "Internal registry adoption summary:" in output
+    assert "nexus.internal:8088: 2/2 references matched 2 local targets" in output
+    assert "managed prefix: nexus.internal:8088/some-repo/sub-repo" in output
+    adoption_report = json.loads((root / "platform-init-report.json").read_text(encoding="utf-8"))
+    assert adoption_report["validation"] == {"errors": [], "valid": True, "warnings": []}
+    assert adoption_report["registry_adoptions"] == [
+        {
+            "local_reference_count": 2,
+            "local_target_count": 2,
+            "managed_prefixes": ["nexus.internal:8088/some-repo/sub-repo"],
+            "reference_count": 2,
+            "registry": "nexus.internal:8088",
+            "unmatched_reference_count": 0,
+        }
+    ]
+
+
+def test_init_keeps_mixed_internal_registry_content_external_without_config_noise(
+    tmp_path: Path, capsys
+) -> None:
+    root = tmp_path / "repository"
+    targets = root / "containers"
+    definitions = {
+        "base": "FROM alpine:3.22\n",
+        "tooling": "FROM alpine:3.22\n",
+        "application": (
+            "FROM nexus.internal:8088/some-repo/sub-repo/base:v1\n"
+            "COPY --from=nexus.internal:8088/some-repo/sub-repo/tooling:v1 /tool /tool\n"
+            "COPY --from=nexus.internal:8088/some-repo/sub-repo/vendor-sdk:v4 /sdk /sdk\n"
+        ),
+    }
+    for name, dockerfile in definitions.items():
+        directory = targets / name
+        directory.mkdir(parents=True)
+        (directory / "Dockerfile").write_text(dockerfile, encoding="utf-8")
+
+    assert main(["init"], cwd=root, environment={}) == 0
+
+    config = RepositoryConfig.load(root)
+    assert config.identity.internal_registries == {"nexus.internal:8088"}
+    assert config.identity.managed_repository_prefixes == ()
+    report = validate_repository(config)
+    assert report.valid
+    assert report.graph.direct_dependencies("application") == ("base", "tooling")
+    assert [item.resolved for item in report.graph.external_dependencies["application"]] == [
+        "nexus.internal:8088/some-repo/sub-repo/vendor-sdk:v4"
+    ]
+    assert "2/3 references matched 2 local targets" in capsys.readouterr().out
+
+
+def test_interactive_init_resolves_one_grouped_ambiguous_nexus_repository(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    root = tmp_path / "repository"
+    targets = root / "containers"
+    definitions = {
+        "base": "FROM alpine:3.22\n",
+        "tooling": "FROM alpine:3.22\n",
+        "ubuntu24-04-base": "FROM alpine:3.22\n",
+        "ubuntu-2404-base": "FROM alpine:3.22\n",
+        "application": (
+            "FROM nexus.internal:8088/team/images/base:v1\n"
+            "COPY --from=nexus.internal:8088/team/images/tooling:v1 /tool /tool\n"
+            "COPY --from=nexus.internal:8088/team/images/ubuntu-24-04-base:v1 /x /x\n"
+        ),
+    }
+    for name, dockerfile in definitions.items():
+        directory = targets / name
+        directory.mkdir(parents=True)
+        (directory / "Dockerfile").write_text(dockerfile, encoding="utf-8")
+    answers = iter(("", "1"))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    assert main(["init", "--interactive"], cwd=root, environment={}) == 0
+
+    config = RepositoryConfig.load(root)
+    chosen = config.images["ubuntu-2404-base"]
+    assert chosen.repository == "team/images/ubuntu-24-04-base"
+    assert not validate_repository(config).errors
+    output = capsys.readouterr().out
+    assert "Probable internal registry: nexus.internal:8088" in output
+    assert "Qualified repository needing review" in output
+    assert "user-confirmed canonical repository" in output
 
 
 def test_init_rejects_incompatible_builder_and_transport(tmp_path: Path, capsys) -> None:
@@ -656,6 +823,34 @@ def test_reconcile_checks_then_applies_minimal_updates_and_is_idempotent(
     assert main(["reconcile"], cwd=root, environment={}) == 0
     assert configuration.read_text(encoding="utf-8") == reconciled
     assert "Configuration already reconciled" in capsys.readouterr().out
+
+
+def test_reconcile_adds_one_grouped_internal_registry_policy(tmp_path: Path, capsys) -> None:
+    root = tmp_path / "repository"
+    targets = root / "containers"
+    for name in ("base", "tooling", "application"):
+        directory = targets / name
+        directory.mkdir(parents=True)
+        (directory / "Dockerfile").write_text("FROM alpine:3.22\n", encoding="utf-8")
+    assert main(["init", "--namespace", "owned/team"], cwd=root, environment={}) == 0
+    capsys.readouterr()
+    (targets / "application" / "Dockerfile").write_text(
+        "FROM nexus.internal:8088/some-repo/sub-repo/base:v1\n"
+        "COPY --from=nexus.internal:8088/some-repo/sub-repo/tooling:v1 /tool /tool\n",
+        encoding="utf-8",
+    )
+
+    assert main(["reconcile"], cwd=root, environment={}) == 0
+
+    config = RepositoryConfig.load(root)
+    assert config.identity.internal_registries == {"nexus.internal:8088"}
+    assert config.identity.managed_repository_prefixes == (
+        "nexus.internal:8088/some-repo/sub-repo",
+    )
+    assert validate_repository(config).valid
+    output = capsys.readouterr().out
+    assert "Added grouped internal registry policy:" in output
+    assert "managed prefix: nexus.internal:8088/some-repo/sub-repo" in output
 
 
 def test_reconcile_adds_a_canonical_exception_inside_the_existing_namespace(
@@ -808,6 +1003,42 @@ def test_reconcile_respects_external_exceptions_and_leaves_ambiguity_for_review(
     assert main(["reconcile"], cwd=root, environment={}) == 0
     assert configuration.read_text(encoding="utf-8") == external_before
     assert "Warnings:" not in capsys.readouterr().out
+
+
+def test_reconcile_does_not_adopt_a_registry_from_explicit_external_evidence(
+    tmp_path: Path, capsys
+) -> None:
+    root = tmp_path / "repository"
+    targets = root / "containers"
+    base = targets / "base"
+    base.mkdir(parents=True)
+    (base / "Dockerfile").write_text("FROM alpine:3.22\n", encoding="utf-8")
+    consumers: list[Path] = []
+    for index in range(3):
+        consumer = targets / f"consumer-{index}"
+        consumer.mkdir(parents=True)
+        (consumer / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+        consumers.append(consumer)
+    assert main(["init", "--namespace", "owned/team"], cwd=root, environment={}) == 0
+    capsys.readouterr()
+
+    configuration = root / "platform-images.toml"
+    with configuration.open("a", encoding="utf-8") as stream:
+        stream.write('\n[identity]\nexternal_repositories = ["nexus.internal:8088/vendor/base"]\n')
+    for consumer in consumers:
+        (consumer / "Dockerfile").write_text(
+            "FROM nexus.internal:8088/vendor/base:latest\n",
+            encoding="utf-8",
+        )
+    before = configuration.read_text(encoding="utf-8")
+
+    assert main(["reconcile"], cwd=root, environment={}) == 0
+
+    assert configuration.read_text(encoding="utf-8") == before
+    config = RepositoryConfig.load(root)
+    assert not config.identity.internal_registries
+    assert validate_repository(config).valid
+    assert "Configuration already reconciled" in capsys.readouterr().out
 
 
 def test_reconcile_refuses_to_rewrite_an_inline_image_table(tmp_path: Path, capsys) -> None:

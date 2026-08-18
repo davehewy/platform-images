@@ -91,6 +91,59 @@ def test_builder_and_registry_transport_are_independent_but_storage_compatible(
     assert config.registry.transport.value == "podman"
 
 
+def test_managed_repository_prefix_must_belong_to_declared_internal_registry(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory({"base": "FROM alpine\n"})
+    config_path = root / "platform-images.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        + """\
+
+[identity]
+internal_registries = ["nexus.internal:8088"]
+managed_repository_prefixes = ["another.internal:8088/team/images"]
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="beneath identity.internal_registries"):
+        RepositoryConfig.load(root)
+
+
+def test_internal_registry_validation_groups_many_owned_namespace_misses(
+    repository_factory: Callable[[dict[str, str]], Path],
+) -> None:
+    root = repository_factory(
+        {
+            "base-one": "FROM alpine\n",
+            "base-two": "FROM alpine\n",
+            "application": (
+                "FROM nexus.internal:8088/team/images/baes-one:v1\n"
+                "COPY --from=nexus.internal:8088/team/images/baes-two:v1 /x /x\n"
+            ),
+        }
+    )
+    config_path = root / "platform-images.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        + """\
+
+[identity]
+internal_registries = ["nexus.internal:8088"]
+managed_repository_prefixes = ["nexus.internal:8088/team/images"]
+""",
+        encoding="utf-8",
+    )
+
+    report = validate_repository(RepositoryConfig.load(root))
+
+    missing = [issue for issue in report.errors if issue.code == "missing-internal-target"]
+    assert len(missing) == 1
+    assert "2 unresolved repository identities across 2 references" in missing[0].message
+    assert "nexus.internal:8088" in missing[0].message
+
+
 def test_incompatible_builder_and_registry_storage_are_rejected(
     repository_factory: Callable[[dict[str, str]], Path],
 ) -> None:

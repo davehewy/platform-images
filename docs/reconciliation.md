@@ -19,6 +19,7 @@ Reconciliation is additive and follows the existing policy from broadest to narr
 | Evidence | Safe action |
 | --- | --- |
 | A new unqualified external base does not resemble a local target | Add it to `dockerfile.allowed_short_external_images`. |
+| Several qualified references from one registry match local targets | Add one `identity.internal_registries` hostname and, only when every observed member matches, one managed repository prefix. |
 | A qualified near-match belongs to `registry.namespace`, and the target has no output override | Add the exceptional `images.<target>.repository`. |
 | A qualified near-match belongs to another namespace | Add one dependency alias. |
 | The target already has a different output repository | Preserve it and add the new spelling as an input-only alias. |
@@ -29,6 +30,12 @@ The command never changes `registry.namespace`, removes a manual setting, redire
 output repository, or adds discovery roots. Namespace and root changes alter ownership or publish
 destinations and therefore remain explicit team decisions. Exact remote basenames continue to
 resolve without configuration, regardless of registry hostname or intermediate path.
+
+Internal registry inference is deliberately mixed-registry safe. A shared Nexus hostname is an
+adoption signal, not proof that all of its repositories are local. Unmatched sources on that host
+remain external. `managed_repository_prefixes` is added only when every observed repository beneath
+the exact prefix resolves to a discovered target, preventing one broad setting from turning vendor
+images into missing-target errors.
 
 Configured `[dockerfile.arguments]` values participate in reconciliation, so a later expression
 such as `${SOURCE_REGISTRY}/ubuntu-24-04-base:latest` is evaluated using the same checked-in value
