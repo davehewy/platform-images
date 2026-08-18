@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reproducible benchmark for discovery, graph planning, and generated CI pipelines."""
+"""Reproducible benchmark for discovery, graph planning, CI pipelines, and Buildx Bake."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from platform_images.changes import map_changes
 from platform_images.config import RepositoryConfig
 from platform_images.models import BuildMode, ChangedPath
 from platform_images.planner import affected_reasons, all_ci_plan, local_plan
+from platform_images.renderers.bake import render_bake
 from platform_images.renderers.github import graph_layer_count, render_github_workflow
 from platform_images.renderers.gitlab import render_gitlab
 from platform_images.renderers.graph_text import render_graph_text
@@ -124,6 +125,14 @@ def run_benchmark(image_count: int, iterations: int, scenario: str = "imperfect"
                 f"received {len(report.warnings)}"
             )
         graph = report.graph
+        bake_plan = all_ci_plan(
+            graph,
+            config,
+            head_sha="a" * 40,
+            mode=BuildMode.MERGE_REQUEST,
+            registry="registry.example.com",
+            pipeline_id="12345",
+        )
         leaf = next(reversed(locations))
         root_target = next(iter(locations))
         root_change = ChangedPath(
@@ -183,6 +192,12 @@ def run_benchmark(image_count: int, iterations: int, scenario: str = "imperfect"
                 raise RuntimeError("generated CI output omitted image targets or dependency layers")
             return plan_json, gitlab, github
 
+        def render_bake_plan() -> object:
+            rendered = render_bake(bake_plan, config, group_name="affected")
+            if rendered.count('\ntarget "image-') != image_count:
+                raise RuntimeError("generated Bake output omitted image targets")
+            return rendered
+
         def render_terminal_graph() -> object:
             rendered = render_graph_text(graph, ascii_only=True)
             line_count = len(rendered.splitlines())
@@ -211,6 +226,7 @@ def run_benchmark(image_count: int, iterations: int, scenario: str = "imperfect"
                 "change_and_affected": measure(change_and_affected, iterations),
                 "render_terminal_graph": measure(render_terminal_graph, iterations),
                 "ci_plan_and_render": measure(ci_plan_and_render, iterations),
+                "render_bake": measure(render_bake_plan, iterations),
             },
         }
 
@@ -238,6 +254,12 @@ def parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="fail if median all-image planning and GitHub/GitLab rendering exceeds this threshold",
+    )
+    result.add_argument(
+        "--max-bake-render-ms",
+        type=float,
+        default=None,
+        help="fail if median complete Docker Buildx Bake rendering exceeds this threshold",
     )
     result.add_argument(
         "--max-graph-render-ms",
@@ -272,6 +294,7 @@ def main() -> int:
         "local_plan_leaf": arguments.max_leaf_plan_ms,
         "render_terminal_graph": arguments.max_graph_render_ms,
         "ci_plan_and_render": arguments.max_ci_render_ms,
+        "render_bake": arguments.max_bake_render_ms,
     }
     for operation, threshold in thresholds.items():
         median = result["operations"][operation]["median_ms"]

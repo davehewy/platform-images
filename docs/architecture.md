@@ -43,13 +43,17 @@ package makes repository conventions explicit and testable.
 10. **GitHub renderer** generates static graph-depth jobs whose runtime matrices contain only the
     dependency-safe layers of the affected plan. The saved plan is passed as an artifact and
     strictly revalidated in every matrix build.
-11. **Configuration reconciler** reruns adoption inference inside configured roots, merges only
+11. **Docker Bake renderer** turns a local, CI, or persisted plan into deterministic HCL. Selected
+    parents become native `target:` contexts, parents outside a partial plan remain digest-pinned
+    `docker-image://` contexts, and ARG-bound image operands use the executor's narrow Dockerfile
+    rewrite without modifying source files.
+12. **Configuration reconciler** reruns adoption inference inside configured roots, merges only
     high-confidence additive identity policy, writes atomically, and restores the original file if
     a proposed mapping introduces a new graph error.
-12. **Manifest verifier** joins per-target results only when their commit, source, output, digest,
+13. **Manifest verifier** joins per-target results only when their commit, source, output, digest,
     dependency inputs, and expected target set agree with the plan. The resulting JSON is the
     downstream and release bill of materials.
-13. **Registry provider and transport** resolve stable tags without pulling layers. ECR uses the
+14. **Registry provider and transport** resolve stable tags without pulling layers. ECR uses the
     account and region encoded by its hostname; generic OCI uses the Distribution manifest API,
     including Basic/Bearer challenges and digest-header validation. Builder capabilities determine
     direct or local output; transport capabilities own authentication, inspection, digest capture,
@@ -65,7 +69,8 @@ stored in `dependents`. The graph must be acyclic. Validation performs determini
 cycle detection and reports the closed path; planning refuses to continue until the cycle is
 removed. Topological ordering reverses the dependency constraint for execution, ensuring every
 selected input completes before its consumer. GitLab expresses direct selected edges with `needs`;
-GitHub groups the same partial DAG into dependency-safe parallel layers.
+GitHub groups the same partial DAG into dependency-safe parallel layers; Docker Bake expresses the
+same selected edges with `target:<parent>` named contexts.
 
 The main graph operations are designed around edges rather than repeated whole-graph scans.
 Inverse adjacency is built in `O(V + E)`, deterministic topological ordering uses a heap in
@@ -75,7 +80,7 @@ topological pass. Near-match results are cached per normalized external reposito
 of an immutable resolver, avoiding a repeated all-target fuzzy scan when hundreds of targets use
 the same public base. `scripts/benchmark-graph.py` exercises these paths with a configurable graph;
 CI guards a 360-image, 737-edge, seven-root imperfect corpus through validation, planning, change
-impact, and complete GitHub/GitLab rendering.
+impact, and complete GitHub/GitLab/Bake rendering.
 
 ## Reference policy
 

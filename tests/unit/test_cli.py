@@ -40,6 +40,7 @@ def test_root_and_images_help_list_described_commands_one_per_line(capsys) -> No
         ("list", "list every discovered image target"),
         ("graph", "print the complete container-image dependency DAG"),
         ("affected", "list changed targets and all of their downstream consumers"),
+        ("generate-bake", "generate a dependency-aware Docker Buildx Bake definition"),
         ("generate-workflow", "generate a complete dependency-aware CI workflow"),
     ):
         assert any(

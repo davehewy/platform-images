@@ -46,6 +46,7 @@ jobs:
           --scenario imperfect --images 360 --iterations 7
           --max-validate-ms 750 --max-leaf-plan-ms 75
           --max-graph-render-ms 75 --max-ci-render-ms 750
+          --max-bake-render-ms 250
 
       - name: Validate pull request title
         if: github.event_name == 'pull_request'

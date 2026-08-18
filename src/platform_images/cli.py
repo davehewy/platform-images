@@ -55,6 +55,7 @@ from platform_images.registry import (
     login_to_registry,
     registry_from_environment_json,
 )
+from platform_images.renderers.bake import render_bake
 from platform_images.renderers.github import render_github_outputs, render_github_workflow
 from platform_images.renderers.gitlab import GITLAB_DEFAULT_JOB_LIMIT, render_gitlab
 from platform_images.renderers.graph_json import graph_data, render_graph_json
@@ -226,6 +227,7 @@ examples:
   platform images graph --format json
   platform images affected --base origin/main --head HEAD
   platform images plan --ci --format json
+  platform images generate-bake --all --output docker-bake.hcl
 
 Run 'platform images COMMAND --help' for command-specific options.
 """,
@@ -313,6 +315,49 @@ Run 'platform images COMMAND --help' for command-specific options.
         type=int,
         default=GITLAB_DEFAULT_JOB_LIMIT,
         help=(f"configured GitLab per-pipeline job limit (default: {GITLAB_DEFAULT_JOB_LIMIT})"),
+    )
+
+    bake = commands.add_parser(
+        "generate-bake",
+        help="generate a dependency-aware Docker Buildx Bake definition",
+        description=(
+            "Generate deterministic Docker Buildx Bake HCL from an authoritative local, change, "
+            "CI, or persisted build plan. With no selector, every discovered image is included."
+        ),
+        epilog="""\
+examples:
+  platform images generate-bake --output docker-bake.hcl
+  platform images generate-bake --image api --output docker-bake.hcl
+  platform images generate-bake --ci --output docker-bake.hcl
+  platform images generate-bake --plan image-plan.json --output docker-bake.hcl
+
+Run 'docker buildx bake --print' to inspect, '--load' for local images, or '--push' in CI.
+""",
+    )
+    bake.add_argument("--all", action="store_true", help="include every discovered image")
+    bake.add_argument(
+        "--image",
+        action="append",
+        default=[],
+        help="include this image and its local dependencies; repeat to select several",
+    )
+    bake.add_argument("--base", help="base Git revision for a change-aware CI plan")
+    bake.add_argument("--head", help="head Git revision for a change-aware CI plan")
+    bake.add_argument(
+        "--ci",
+        action="store_true",
+        help="derive the affected CI plan from CI variables",
+    )
+    bake.add_argument(
+        "--plan",
+        dest="plan_file",
+        type=Path,
+        help="render an existing authoritative plan JSON instead of calculating one",
+    )
+    bake.add_argument(
+        "--output",
+        type=Path,
+        help="write HCL inside the repository instead of printing it",
     )
 
     render_plan = commands.add_parser(
@@ -843,6 +888,8 @@ def _create_plan(
     config: RepositoryConfig,
     report: ValidationReport,
     environment: Mapping[str, str],
+    *,
+    default_all: bool = False,
 ) -> BuildPlan:
     graph = report.graph
     selectors = sum(
@@ -857,6 +904,8 @@ def _create_plan(
         raise PlatformImagesError(
             "choose exactly one of --image, --all, --base/--head, or --ci (--ci --all is allowed)"
         )
+    if selectors == 0 and default_all:
+        return local_plan(graph, config, frozenset(graph.targets))
     if arguments.all and not arguments.ci:
         return local_plan(graph, config, frozenset(graph.targets))
     if arguments.image:
@@ -1043,6 +1092,47 @@ def _run(arguments: argparse.Namespace, cwd: Path | None, environment: Mapping[s
             )
         else:
             print(render_plan_text(plan))
+        return 0
+    if arguments.command == "generate-bake":
+        selectors = any(
+            (
+                arguments.all,
+                arguments.image,
+                arguments.base,
+                arguments.head,
+                arguments.ci,
+            )
+        )
+        if arguments.plan_file is not None and selectors:
+            raise PlatformImagesError("--plan cannot be combined with another Bake selector")
+        plan = (
+            _load_plan(_artifact_path(arguments.plan_file, root), graph, config)
+            if arguments.plan_file is not None
+            else _create_plan(arguments, config, report, environment, default_all=True)
+        )
+        if plan.mode is not BuildMode.LOCAL:
+            group_name = "affected"
+        elif arguments.plan_file is not None or arguments.image:
+            group_name = "selected"
+        else:
+            group_name = "all"
+        rendered = render_bake(
+            plan,
+            config,
+            group_name=group_name,
+            source=environment.get("CI_PROJECT_URL"),
+        )
+        if arguments.output is None:
+            print(rendered, end="")
+        else:
+            output = _artifact_path(arguments.output, root)
+            try:
+                relative_output = output.resolve().relative_to(root)
+            except ValueError as exc:
+                raise PlatformImagesError("Bake output must stay within the repository") from exc
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(rendered, encoding="utf-8", newline="\n")
+            print(relative_output.as_posix())
         return 0
     if arguments.command == "render-plan":
         plan = _load_plan(arguments.plan_file, graph, config)

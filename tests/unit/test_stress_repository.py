@@ -18,6 +18,7 @@ from platform_images.planner import (
     validate_plan_against_graph,
 )
 from platform_images.registry import StaticRegistryClient
+from platform_images.renderers.bake import render_bake
 from platform_images.renderers.github import (
     graph_layer_count,
     render_github_outputs,
@@ -286,6 +287,21 @@ def test_360_image_all_ci_plan_covers_every_target_without_registry_reads(
     assert {target.name for target in plan.targets} == set(corpus.names)
     assert all(set(target.input_refs) == set(target.dependencies) for target in plan.targets)
     assert all(set(target.needs) == set(target.dependencies) for target in plan.targets)
+
+    bake = render_bake(
+        plan,
+        config,
+        group_name="affected",
+        source="https://example.com/platform/container-images",
+    )
+    assert bake.count('\ntarget "image-') == IMAGE_COUNT
+    assert bake.count(' = "target:image-') >= sum(map(len, corpus.dependencies.values()))
+    assert "dockerfile-inline = <<PLATFORM_IMAGES_DOCKERFILE" in bake
+    assert "registry.example.com" not in bake
+    assert "nexus.example.com/" in bake
+    assert render_bake(plan, config, group_name="affected") == render_bake(
+        plan, config, group_name="affected"
+    )
 
 
 def test_360_image_cli_validation_and_terminal_graph_stay_bounded(

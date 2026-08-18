@@ -1,0 +1,159 @@
+from __future__ import annotations
+
+import json
+import posixpath
+from collections.abc import Mapping
+
+from platform_images.build import argument_bound_dockerfile_text
+from platform_images.config import RepositoryConfig
+from platform_images.errors import PlatformImagesError
+from platform_images.models import BuildMode, BuildPlan, BuildPlanTarget
+
+
+def bake_target_name(name: str) -> str:
+    """Return an injective Bake-safe name for a validated platform image target."""
+    escaped = name.replace("_", "__").replace(".", "_dot_")
+    return f"image-{escaped}"
+
+
+def _hcl_string(value: str) -> str:
+    # HCL quoted strings evaluate template interpolation. Doubling the sigil preserves literal
+    # Dockerfile, label, path, and image-reference values.
+    escaped = value.replace("${", "$${").replace("%{", "%%{")
+    return json.dumps(escaped, ensure_ascii=False)
+
+
+def _dockerfile_relative_to_context(target: BuildPlanTarget) -> str:
+    return posixpath.relpath(target.dockerfile, target.context)
+
+
+def _heredoc(value: str) -> tuple[str, str]:
+    escaped = value.replace("${", "$${").replace("%{", "%%{")
+    marker = "PLATFORM_IMAGES_DOCKERFILE"
+    lines = set(escaped.splitlines())
+    while marker in lines:
+        marker += "_END"
+    if not escaped.endswith("\n"):
+        escaped += "\n"
+    return marker, escaped
+
+
+def _render_map(name: str, values: Mapping[str, str]) -> list[str]:
+    if not values:
+        return []
+    lines = [f"  {name} = {{"]
+    lines.extend(
+        f"    {_hcl_string(key)} = {_hcl_string(value)}" for key, value in sorted(values.items())
+    )
+    lines.append("  }")
+    return lines
+
+
+def _target_contexts(
+    target: BuildPlanTarget,
+    selected: frozenset[str],
+) -> dict[str, str]:
+    dependency_by_reference = {
+        reference: dependency for dependency, reference in target.input_refs.items()
+    }
+    contexts: dict[str, str] = {}
+    for raw, reference in target.build_contexts.items():
+        if "$" in raw:
+            continue
+        dependency = dependency_by_reference.get(reference)
+        if dependency is None:
+            raise PlatformImagesError(
+                f'Bake context {raw!r} for "{target.name}" has no dependency input'
+            )
+        contexts[raw] = (
+            f"target:{bake_target_name(dependency)}"
+            if dependency in selected
+            else f"docker-image://{reference}"
+        )
+    return dict(sorted(contexts.items()))
+
+
+def _target_labels(
+    plan: BuildPlan,
+    target: BuildPlanTarget,
+    source: str | None,
+) -> dict[str, str]:
+    labels = {
+        "io.platform-images.input-references": json.dumps(
+            dict(sorted(target.input_refs.items())), separators=(",", ":")
+        ),
+        "io.platform-images.target": target.name,
+        "org.opencontainers.image.revision": plan.head_sha,
+    }
+    if source:
+        labels["org.opencontainers.image.source"] = source
+    return dict(sorted(labels.items()))
+
+
+def _render_target(
+    plan: BuildPlan,
+    target: BuildPlanTarget,
+    config: RepositoryConfig,
+    selected: frozenset[str],
+    source: str | None,
+) -> list[str]:
+    lines = [f"target {_hcl_string(bake_target_name(target.name))} {{"]
+    lines.append(f"  context = {_hcl_string(target.context)}")
+    rewritten = argument_bound_dockerfile_text(target, root=config.root)
+    if rewritten is None:
+        lines.append(f"  dockerfile = {_hcl_string(_dockerfile_relative_to_context(target))}")
+    else:
+        marker, dockerfile = _heredoc(rewritten)
+        lines.append(f"  dockerfile-inline = <<{marker}")
+        lines.extend(dockerfile.rstrip("\n").splitlines())
+        lines.append(marker)
+    lines.extend(_render_map("args", config.dockerfile.arguments))
+    lines.extend(_render_map("contexts", _target_contexts(target, selected)))
+    lines.extend(_render_map("labels", _target_labels(plan, target, source)))
+    lines.extend(
+        [
+            "  tags = [",
+            f"    {_hcl_string(target.output_ref)},",
+            "  ]",
+            "}",
+        ]
+    )
+    return lines
+
+
+def render_bake(
+    plan: BuildPlan,
+    config: RepositoryConfig,
+    *,
+    group_name: str | None = None,
+    source: str | None = None,
+) -> str:
+    """Render one authoritative build plan as deterministic Docker Buildx Bake HCL."""
+    names = tuple(target.name for target in plan.targets)
+    bake_names = tuple(bake_target_name(name) for name in names)
+    if len(bake_names) != len(set(bake_names)):
+        raise PlatformImagesError("logical image target names collide after Bake-safe encoding")
+    selected = frozenset(names)
+    chosen_group = group_name or ("affected" if plan.mode is not BuildMode.LOCAL else "selected")
+    if chosen_group == "default":
+        raise PlatformImagesError('Bake selection group cannot be named "default"')
+
+    lines = [
+        "# Generated by platform images generate-bake. Do not edit by hand.",
+        "# Regenerate after changing platform-images.toml or the image dependency graph.",
+        "# Inspect: docker buildx bake --file PATH --print",
+        "# Local:   docker buildx bake --file PATH --load",
+        "# Push:    docker buildx bake --file PATH --push --metadata-file image-metadata.json",
+        "",
+    ]
+    if not plan.targets:
+        lines.extend(["# No images are affected; both groups below are intentional no-ops.", ""])
+    for name in ("default", chosen_group):
+        lines.extend([f"group {_hcl_string(name)} {{", "  targets = ["])
+        lines.extend(f"    {_hcl_string(target)}," for target in bake_names)
+        lines.extend(["  ]", "}", ""])
+    for index, target in enumerate(plan.targets):
+        lines.extend(_render_target(plan, target, config, selected, source))
+        if index != len(plan.targets) - 1:
+            lines.append("")
+    return "\n".join(lines) + "\n"

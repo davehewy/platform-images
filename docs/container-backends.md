@@ -34,6 +34,13 @@ daemonless Linux fleets and share the containers-storage implementation. [nerdct
 adds materially different coverage for teams whose build and runtime substrate is containerd;
 `nerdctl build` requires a running BuildKit daemon as well as containerd.
 
+Docker users can also run `platform images generate-bake` to export a local, affected, or persisted
+plan as native Buildx HCL. In-plan dependencies use Bake's `target:<parent>` contexts; unchanged
+parents outside a partial CI plan use digest-pinned `docker-image://` contexts. The integration gate
+parses and builds a qualified ARG-bound parent chain through the generated file. Bake is not listed
+as a separate backend because it is an execution format for the existing Docker Buildx backend,
+not a portable interface shared with Podman, Buildah, or nerdctl. See [the Bake guide](docker-bake.md).
+
 BuildKit defines `docker-image://` as a registry source. Consequently, a local nerdctl graph does
 not rely on a containerd tag being accidentally visible to BuildKit. After each parent build, the
 controller exports it with `nerdctl save`, validates that the OCI index contains one image manifest
