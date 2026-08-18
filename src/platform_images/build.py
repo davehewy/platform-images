@@ -87,12 +87,11 @@ def build_command(
     return command
 
 
-def _materialize_bound_dockerfile(
+def argument_bound_dockerfile_text(
     target: BuildPlanTarget,
     *,
     root: Path,
-    directory: Path,
-) -> Path | None:
+) -> str | None:
     raw_contexts = {
         raw: reference for raw, reference in target.build_contexts.items() if "$" in raw
     }
@@ -108,16 +107,31 @@ def _materialize_bound_dockerfile(
             )
         replacements[raw] = dependency
     source = root / target.dockerfile
-    rewritten, replaced = rewrite_argument_image_references(
-        source.read_text(encoding="utf-8"),
-        replacements,
-    )
+    try:
+        text = source.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise PlatformImagesError(
+            f"unable to read Dockerfile for argument binding: {source}: {exc}"
+        ) from exc
+    rewritten, replaced = rewrite_argument_image_references(text, replacements)
     if replaced != frozenset(replacements):
         missing = sorted(set(replacements) - replaced)
         raise PlatformImagesError(
             f'cannot safely rewrite variable image references for "{target.name}": '
             + ", ".join(missing)
         )
+    return rewritten
+
+
+def _materialize_bound_dockerfile(
+    target: BuildPlanTarget,
+    *,
+    root: Path,
+    directory: Path,
+) -> Path | None:
+    rewritten = argument_bound_dockerfile_text(target, root=root)
+    if rewritten is None:
+        return None
     destination = directory / f"{target.name}.Dockerfile"
     destination.write_text(rewritten, encoding="utf-8", newline="\n")
     return destination

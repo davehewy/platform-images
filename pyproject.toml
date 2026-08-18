@@ -5,13 +5,13 @@ build-backend = "hatchling.build"
 [project]
 name = "platform-images"
 dynamic = ["version"]
-description = "Dependency-aware container-image DAGs for GitHub Actions and GitLab CI"
+description = "Dependency-aware container-image DAGs for GitHub Actions, GitLab CI, and Docker Buildx Bake"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 authors = [{ name = "David Heward", email = "dave@bytewire.co.uk" }]
 license = "MIT"
 license-files = ["LICENSE"]
-keywords = ["buildah", "containerd", "containers", "dependency-graph", "devops", "docker", "github-actions", "gitlab-ci", "monorepo", "nerdctl", "podman"]
+keywords = ["bake", "buildah", "buildx", "containerd", "containers", "dependency-graph", "devops", "docker", "github-actions", "gitlab-ci", "monorepo", "nerdctl", "podman"]
 dependencies = ["PyYAML>=6.0.2"]
 
 [project.optional-dependencies]

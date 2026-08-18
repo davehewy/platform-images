@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 
 from platform_images.cli import main
+from platform_images.config import RepositoryConfig
+from platform_images.references import ReferencePolicy
 
 
 def _command_succeeds(arguments: list[str]) -> bool:
@@ -152,6 +154,94 @@ def test_docker_buildx_consumes_controller_selected_local_base() -> None:
         check=False,
         text=True,
         capture_output=True,
+    )
+    assert marker.returncode == 0, marker.stderr
+
+
+@pytest.mark.integration
+def test_generated_bake_builds_an_argument_bound_parent_chain(tmp_path: Path) -> None:
+    if not docker_available():
+        pytest.skip("a working Docker Buildx service is unavailable")
+    root = tmp_path / "qualified-bake"
+    base = root / "containers" / "base.image"
+    application = root / "containers" / "application"
+    base.mkdir(parents=True)
+    application.mkdir(parents=True)
+    (base / "Dockerfile").write_text(
+        "FROM alpine:3.22\nRUN echo exact-bake-parent > /parent-marker\n",
+        encoding="utf-8",
+    )
+    (application / "Dockerfile").write_text(
+        "ARG SOURCE_REGISTRY\n"
+        "FROM ${SOURCE_REGISTRY}/base.image:latest\n"
+        'RUN test "$(cat /parent-marker)" = exact-bake-parent\n',
+        encoding="utf-8",
+    )
+
+    assert (
+        main(
+            [
+                "init",
+                "--builder",
+                "docker",
+                "--build-arg",
+                "SOURCE_REGISTRY=registry.invalid/gitlab",
+            ],
+            cwd=root,
+        )
+        == 0
+    )
+    bake_file = root / "docker-bake.hcl"
+    assert (
+        main(
+            [
+                "images",
+                "generate-bake",
+                "--image",
+                "application",
+                "--output",
+                bake_file.name,
+            ],
+            cwd=root,
+        )
+        == 0
+    )
+    printed = subprocess.run(
+        ["docker", "buildx", "bake", "--file", str(bake_file), "--print"],
+        cwd=root,
+        check=False,
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
+    assert printed.returncode == 0, printed.stderr
+    built = subprocess.run(
+        ["docker", "buildx", "bake", "--file", str(bake_file), "--load"],
+        cwd=root,
+        check=False,
+        text=True,
+        capture_output=True,
+        timeout=180,
+    )
+    assert built.returncode == 0, built.stderr
+
+    output_ref = ReferencePolicy(RepositoryConfig.load(root)).local("application")
+    marker = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--entrypoint",
+            "sh",
+            output_ref,
+            "-c",
+            'test "$(cat /parent-marker)" = exact-bake-parent',
+        ],
+        cwd=root,
+        check=False,
+        text=True,
+        capture_output=True,
+        timeout=30,
     )
     assert marker.returncode == 0, marker.stderr
 

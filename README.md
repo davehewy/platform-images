@@ -37,7 +37,8 @@ workflow. Docker Buildx, Podman, Buildah, and nerdctl/BuildKit are supported exp
 build receives exact image references, and a default-branch pipeline promotes the affected graph
 to stable tags only after the complete graph build succeeds. The pipeline also publishes a
 commit-scoped manifest that tells later test, deployment, and release jobs exactly which immutable
-image digest each target produced.
+image digest each target produced. Docker teams can additionally export the same local or CI plan
+as a native Buildx Bake definition without maintaining another dependency file.
 
 There is no second image catalogue or hand-maintained CI dependency list. The Dockerfiles or
 Containerfiles and Git history remain the source of truth.
@@ -66,6 +67,7 @@ before consumers, while unrelated nodes remain parallelizable.
 - [Configuration capabilities](#configuration-capabilities)
 - [Configuration reconciliation](docs/reconciliation.md)
 - [Container backend compatibility](docs/container-backends.md)
+- [Docker Buildx Bake export](docs/docker-bake.md)
 - [Recommended adoption flow](#recommended-adoption-flow)
 - [Command guide](#command-guide)
 - [CI operating model](#ci-operating-model)
@@ -89,6 +91,7 @@ For a platform or DevOps team, it solves:
   workflow;
 - executing the same exact-reference build contract with Docker Buildx, Podman, Buildah, or
   nerdctl/BuildKit;
+- exporting an optional Docker Buildx Bake definition whose target contexts preserve the same DAG;
 - using unique merge-request and commit tags, with graph-wide stable promotion on `main`;
 - publishing a verified commit-to-image manifest for downstream test, deployment, and release jobs;
 - promoting the already-tested digest to a semantic version without rebuilding it;
@@ -582,6 +585,10 @@ platform images plan --ci --all --format gitlab
 
 # Generate a ready-to-customize GitHub Actions workflow (Docker by default):
 platform images generate-workflow github --output .github/workflows/container-images.yml
+
+# Export the complete graph as native Docker Buildx Bake HCL:
+platform images generate-bake --output docker-bake.hcl
+docker buildx bake --file docker-bake.hcl --print
 ```
 
 ## Worked examples
@@ -661,6 +668,21 @@ platform images build curl --builder nerdctl --dry-run
 All four backends consume the same discovered graph and exact references; the backend changes
 execution, not selection. The [compatibility matrix](docs/container-backends.md) explains daemon,
 storage, and version requirements.
+
+Docker teams can export that same selection as native Buildx Bake HCL:
+
+```bash
+platform images generate-bake --image curl --output docker-bake.hcl
+docker buildx bake --file docker-bake.hcl --print
+docker buildx bake --file docker-bake.hcl --load selected
+```
+
+The generated `curl` target receives `contexts = { "base" = "target:image-base" }`, so BuildKit
+sees the dependency directly and may still build unrelated targets in parallel. Qualified Nexus,
+GitLab, GHCR, and other configured local spellings are bound to the same parent target. Configured
+ARG-based image references are safely materialized as `dockerfile-inline`; ordinary build files
+remain referenced by path. See [Docker Buildx Bake export](docs/docker-bake.md) for affected CI
+plans, immutable unchanged parents, `--push`, metadata, and the deliberate Docker-only boundary.
 
 When the stable local parent is already present and only the leaf needs rebuilding, opt out of the
 upstream closure explicitly:
@@ -1287,6 +1309,12 @@ prints a reviewable diff and inference audit; genuine ambiguities remain grouped
 `--check` to enforce that drift in CI. Namespace changes, output redirection, discovery ownership
 changes, and removal of old mappings remain ordinary reviewed source changes.
 
+Bake export deliberately adds no second configuration table. `generate-bake` consumes the same
+discovery roots, canonical repositories, aliases, Dockerfile ARG values, tag policy, and registry
+inputs as every other planner and renderer. Use normal Buildx `--set`, `--load`, `--push`, secret,
+cache, and platform options for execution-only concerns rather than duplicating them in
+`platform-images.toml`.
+
 This repository's complete configuration is:
 
 ```toml
@@ -1569,7 +1597,8 @@ job, deploy, or robot-account tokens over personal long-lived passwords.
    project, robot-account, deploy-token, or workload-identity controls.
 7. Either add the parent/child setup in [GitLab CI](docs/gitlab-ci.md), or generate and commit
    `.github/workflows/container-images.yml` using [GitHub Actions](docs/github-actions.md). Keep
-   full Git history available to the planning job.
+   full Git history available to the planning job. Docker teams with custom automation can instead
+   export the same persisted plan with [Docker Buildx Bake](docs/docker-bake.md).
 8. Run one `--ci --all` default-branch bootstrap to populate stable tags.
 9. Let ordinary merge-request and default-branch pipelines use `--ci` to calculate the minimal
    rebuild set.
@@ -1599,6 +1628,7 @@ job, deploy, or robot-account tokens over personal long-lived passwords.
 | `platform images plan --ci` | Calculate a CI change plan and exact references from normalized GitLab/GitHub environment inputs. |
 | `platform images plan --ci --all` | Force a complete CI bootstrap or recovery plan. |
 | `platform images render-plan image-plan.json --format gitlab [--gitlab-max-jobs <n>]` | Validate and render the persisted plan into child-pipeline YAML, failing before GitLab when the exact generated job count exceeds the configured provider limit (default 500). |
+| `platform images generate-bake [--all\|--image <name>\|--ci\|--plan <file>] [--output docker-bake.hcl]` | Export deterministic Docker Buildx Bake HCL. Local parents use `target:` contexts, unchanged CI parents use digest-pinned `docker-image://` contexts, and empty affected plans are valid no-ops. |
 | `platform images generate-workflow github [--builder <name>] [--registry-transport <name>] [--output <path>]` | Generate a complete dependency-layered GitHub Actions workflow. |
 | `platform images ci-build ... [--result-file <path>] [--builder <name>] [--registry-transport <name>]` | Execute one CI target with exact input/output references and optionally persist its digest result; normally called only by generated jobs. |
 | `platform images build-plan-target <plan> <name> [--result-file <path>]` | Strictly reload a persisted plan, build its named target, and optionally persist its result; used by GitHub matrix jobs. |
@@ -1636,6 +1666,11 @@ stable or semantic tags. Default-branch promotion runs only after manifest verif
 GitLab, the project-defined `consume` stage). Removed targets are reported but are not deleted from
 the registry; lifecycle and deletion policy remain explicit infrastructure responsibilities.
 
+`generate-bake` is an additional Docker execution renderer over the same plan. It does not replace
+the generated workflows' retry identity checks, verified digest manifest, or gated promotions.
+Custom CI can persist `image-plan.json`, render HCL from it, and invoke Buildx once with `--push`;
+teams that want the complete delivery contract should retain the GitHub or GitLab workflow.
+
 See [architecture](docs/architecture.md), [adding an image](docs/adding-an-image.md),
 [GitHub Actions](docs/github-actions.md), [GitLab CI](docs/gitlab-ci.md),
 [ECR setup](docs/ecr-setup.md), and
@@ -1646,8 +1681,9 @@ See [architecture](docs/architecture.md), [adding an image](docs/adding-an-image
 **The graph controller is fast, including on imperfect repositories.** A deterministic 360-image
 stress repository with 737 local edges validates in about 160 ms, maps a foundation change to all
 360 affected images in about 0.32 ms, renders its bounded 742-line terminal graph in about 1.1 ms,
-and creates the complete image plan plus both GitHub and GitLab CI output in about 150 ms on the
-development machine used for the reference run.
+creates the complete image plan plus both GitHub and GitLab CI output in about 151 ms, and renders
+the full native Buildx Bake definition in about 13 ms on the development machine used for the
+reference run.
 
 The default benchmark is deliberately awkward rather than perfectly tidy. It creates 360 mixed
 `Dockerfile`/`Containerfile` targets across seven roots—including overlapping `utils` and
@@ -1663,14 +1699,14 @@ writes exactly those eight mappings and is byte-for-byte idempotent on its next 
 mutate the full corpus to prove deterministic rejection of cycles, ambiguous aliases, missing
 managed images, and malformed syntax.
 
-These are median results from 14 August 2026 using Python 3.12:
+These are median results from 17 August 2026 using Python 3.12:
 
-| Scenario | Images | Edges | Runs | Validate | Topological order | Plan leaf/upstream set | Root change impact | Terminal graph | Plan + render GitHub and GitLab |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Imperfect layered repo | 360 | 737 | 25 | 162.297 ms | 0.158 ms | 9.113 ms / 202 images | 0.324 ms / 360 images | 1.125 ms / 742 lines | 151.275 ms |
-| Imperfect layered repo | 1,000 | 2,086 | 5 | 601.176 ms | 0.469 ms | 41.941 ms / 914 images | 0.954 ms / 1,000 images | 4.143 ms / 2,091 lines | 412.766 ms |
-| Clean multi-parent chain | 100 | 292 | 25 | 23.416 ms | 0.042 ms | 4.341 ms / 100 images | 0.099 ms / 100 images | — | — |
-| Clean multi-parent chain | 1,000 | 2,992 | 10 | 233.790 ms | 0.476 ms | 45.671 ms / 1,000 images | 0.956 ms / 1,000 images | — | — |
+| Scenario | Images | Edges | Runs | Validate | Topological order | Plan leaf/upstream set | Root change impact | Terminal graph | Plan + render GitHub and GitLab | Render Bake HCL |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Imperfect layered repo | 360 | 737 | 25 | 162.759 ms | 0.154 ms | 8.847 ms / 202 images | 0.313 ms / 360 images | 1.073 ms / 742 lines | 150.932 ms | 12.714 ms |
+| Imperfect layered repo | 1,000 | 2,086 | 10 | 595.309 ms | 0.468 ms | 41.393 ms / 914 images | 0.922 ms / 1,000 images | 4.044 ms / 2,091 lines | 401.921 ms | 34.819 ms |
+| Clean multi-parent chain | 100 | 292 | 25 | 23.416 ms | 0.042 ms | 4.341 ms / 100 images | 0.099 ms / 100 images | — | — | — |
+| Clean multi-parent chain | 1,000 | 2,992 | 10 | 233.790 ms | 0.476 ms | 45.671 ms / 1,000 images | 0.956 ms / 1,000 images | — | — | — |
 
 Run `scripts/benchmark-graph.py` to see how fast it is on your laptop or CI runner:
 
@@ -1681,17 +1717,18 @@ uv run --locked python scripts/benchmark-graph.py \
 
 Use `--scenario chain` for the simpler deep multi-parent graph, and change `--images` to test a
 larger repository. Use `--json` to capture comparable results. `--max-validate-ms`,
-`--max-leaf-plan-ms`, `--max-graph-render-ms`, and `--max-ci-render-ms` turn measurements into
-regression budgets. The figures above measure the controller—filesystem discovery, Dockerfile
-parsing, graph construction, change propagation, planning, terminal rendering, and YAML/JSON
-generation—not container builds or registry transfers. They are evidence from one machine rather
-than hardware guarantees, so benchmark the intended CI runner before choosing a local threshold.
+`--max-leaf-plan-ms`, `--max-graph-render-ms`, `--max-ci-render-ms`, and
+`--max-bake-render-ms` turn measurements into regression budgets. The figures above measure the
+controller—filesystem discovery, Dockerfile parsing, graph construction, change propagation,
+planning, terminal rendering, and YAML/JSON/HCL generation—not container builds or registry
+transfers. They are evidence from one machine rather than hardware guarantees, so benchmark the
+intended CI runner before choosing a local threshold.
 
 The implementation avoids work that grows quadratically with the number of images:
 
 - inverse dependency edges are constructed in one pass over the graph;
 - deterministic topological ordering uses a priority queue;
-- affected selection visits each reachable target and edge once; and
+- affected selection visits each reachable target and edge once;
 - local dependency reasons propagate through one reverse topological pass, using compact bitsets
   when several explicit targets are selected; and
 - repeated qualified external names reuse their near-match result, so hundreds of identical public
@@ -1699,11 +1736,11 @@ The implementation avoids work that grows quadratically with the number of image
 
 CI recreates the 360-image imperfect repository and applies deliberately generous median ceilings
 of 750 ms for discovery/validation, 75 ms each for leaf planning and bounded terminal rendering,
-and 750 ms for all-image planning plus both pipeline renderers. Those ceilings catch accidental
-repeated scans, exponential tree expansion, and per-target closure work without turning normal
-runner variance into flaky builds. Dockerfile reads, parsing, and YAML serialization remain the
-largest controller costs; actual container builds and registry transfers will ordinarily dominate
-total pipeline time by orders of magnitude.
+750 ms for all-image planning plus both pipeline renderers, and 250 ms for Bake rendering. Those
+ceilings catch accidental repeated scans, exponential tree expansion, and per-target closure work
+without turning normal runner variance into flaky builds. Dockerfile reads, parsing, and YAML/HCL
+serialization remain the largest controller costs; actual container builds and registry transfers
+will ordinarily dominate total pipeline time by orders of magnitude.
 
 ## Quality and integration checks
 
@@ -1719,7 +1756,9 @@ The integration suite builds and verifies the `base -> curl` topology with Docke
 Buildah, and nerdctl/BuildKit, including a qualified local parent supplied through a configured
 Dockerfile `ARG`; it skips only tooling unavailable locally. The 100-image enterprise fixture still
 tests real Git change detection across four roots and several registry identities. The separate
-360-image adversarial fixture goes wider and noisier, and checks both generated CI formats in full.
+360-image adversarial fixture goes wider and noisier, and checks both generated CI formats plus the
+complete Buildx Bake HCL in full. A real Docker integration test parses and executes the generated
+ARG-bound parent chain with `docker buildx bake --load`.
 GitHub CI installs or verifies all four backends and requires every real build to pass. It also
 repeats the locked quality suite and builds the wheel and source distribution. Conventional Commit
 messages drive Python Semantic Release after `main` passes CI; releases add all-asset checksums, an

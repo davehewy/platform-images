@@ -109,6 +109,7 @@ def test_github_actions_are_immutable_and_ci_gates_release() -> None:
     assert "--max-leaf-plan-ms 75" in benchmark_step["run"]
     assert "--max-graph-render-ms 75" in benchmark_step["run"]
     assert "--max-ci-render-ms 750" in benchmark_step["run"]
+    assert "--max-bake-render-ms 250" in benchmark_step["run"]
 
 
 def test_release_workflow_builds_all_supported_standalone_platforms() -> None:
